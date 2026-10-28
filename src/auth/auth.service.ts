@@ -516,83 +516,62 @@ export class AuthService {
     };
   }
 
-  /**
-   * 12. DEMANDE DE SUPPRESSION DE COMPTE
-   */
-  async requestDelete(userId: string, channelToken?: string) {
-    this.assertDevOtpEnabled();
-
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-    });
-
-    if (!user || user.status !== UserStatus.ACTIVE) {
-      throw new NotFoundException();
-    }
-
-    return this.issueOtp(decrypt(user.phoneEnc), OtpPurpose.ACCOUNT_DELETE, channelToken);
-  }
-
-  /**
-   * 13. SUPPRESSION DU COMPTE
-   */
   async deleteAccount(userId: string, dto: DeleteAccountDto) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
+      select: {
+        id: true,
+        status: true,
+        passwordHash: true,
+      },
     });
 
-    if (
-      !user?.passwordHash ||
-      user.status !== UserStatus.ACTIVE ||
-      !(await verifyPassword(dto.password, user.passwordHash))
-    ) {
-      throw new UnauthorizedException();
+    // Ne pas révéler inutilement l'état du compte.
+    if (!user || user.status !== UserStatus.ACTIVE || !user.passwordHash) {
+      throw new UnauthorizedException('Compte non autorisé');
     }
 
-    const changed = await this.prisma.$transaction(async (tx) => {
-      const phoneHmac = await this.consumeOtp(
-        tx,
-        dto.challengeId,
-        dto.code,
-        OtpPurpose.ACCOUNT_DELETE,
-      );
+    const passwordIsValid = await verifyPassword(dto.password, user.passwordHash);
 
-      if (!phoneHmac) {
-        return false;
-      }
+    if (!passwordIsValid) {
+      throw new UnauthorizedException('Mot de passe incorrect');
+    }
 
-      if (phoneHmac !== user.phoneHmac) {
-        throw new ForbiddenException();
-      }
+    const now = new Date();
 
-      await tx.user.update({
-        where: { id: userId },
+    await this.prisma.$transaction(async (tx) => {
+      // Mise à jour conditionnelle :
+      // empêche une deuxième suppression simultanée.
+      const result = await tx.user.updateMany({
+        where: {
+          id: userId,
+          status: UserStatus.ACTIVE,
+        },
         data: {
           status: UserStatus.DELETED,
-          deletedAt: new Date(),
+          deletedAt: now,
           passwordHash: null,
         },
       });
 
+      if (result.count !== 1) {
+        throw new UnauthorizedException('Compte non autorisé');
+      }
+
+      // Révocation de toutes les sessions.
       await tx.session.updateMany({
         where: {
           userId,
           revokedAt: null,
         },
         data: {
-          revokedAt: new Date(),
+          revokedAt: now,
         },
       });
-
-      return true;
     });
 
-    if (!changed) {
-      throw new BadRequestException('Code invalide ou expiré');
-    }
-
     return {
-      message: 'Compte désactivé ; conservation légale des données applicable',
+      message: 'Compte désactivé avec succès',
     };
   }
 }
