@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString, IsUUID, Length, Matches, MinLength } from 'class-validator';
+import { IsNotEmpty, IsString, IsUUID, Length, Matches, MinLength } from 'class-validator';
 export class PhoneDto {
   @ApiProperty({ example: '+237690000000' }) @Matches(/^\+[1-9]\d{7,14}$/) phone!: string;
 }
@@ -28,7 +28,11 @@ export class RefreshDto {
   @ApiProperty() @IsString() refreshToken!: string;
 }
 export class DeleteAccountDto {
-  @ApiProperty() @IsString() password!: string;
-  @ApiProperty() @IsUUID() challengeId!: string;
-  @ApiProperty() @Matches(/^\d{6}$/) code!: string;
+  @ApiProperty({
+    description: 'Mot de passe actuel du compte',
+    example: 'MonMotDePasse',
+  })
+  @IsString()
+  @IsNotEmpty()
+  password!: string;
 }
