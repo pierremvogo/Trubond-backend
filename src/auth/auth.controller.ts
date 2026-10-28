@@ -265,51 +265,28 @@ export class AuthController {
   }
 
   /**
-   * 12. DEMANDE DE SUPPRESSION DE COMPTE
+   * 12. SUPPRESSION DU COMPTE
    *
-   * Demande un OTP de suppression.
-   * Nécessite une session active.
-   */
-  @UseGuards(AccessTokenGuard)
-  @ApiBearerAuth()
-  @Post('account/delete/request')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Demander un OTP de suppression de compte',
-  })
-  @ApiHeader({
-    name: 'x-dev-otp-channel',
-    required: false,
-    description: 'Token du canal Socket.IO pour recevoir l’OTP en développement.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'OTP de suppression demandé',
-  })
-  deleteRequest(
-    @CurrentAuth() auth: AuthContext,
-    @Headers('x-dev-otp-channel')
-    channelToken?: string,
-  ) {
-    return this.service.requestDelete(auth.userId, channelToken);
-  }
-
-  /**
-   * 13. SUPPRESSION DU COMPTE
-   *
-   * Vérifie le mot de passe et l'OTP,
-   * puis désactive le compte.
+   * Nécessite une session active et le mot de passe actuel.
+   * Désactive le compte et révoque toutes les sessions.
    */
   @UseGuards(AccessTokenGuard)
   @ApiBearerAuth()
   @Delete('account')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Désactiver le compte avec OTP et mot de passe',
+    summary: 'Supprimer mon compte avec mon mot de passe',
+    description:
+      'Désactive le compte, invalide les sessions et ' +
+      'déclenche le traitement des données personnelles.',
   })
   @ApiResponse({
     status: 200,
-    description: 'Compte désactivé',
+    description: 'Compte désactivé avec succès',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Mot de passe incorrect ou session invalide',
   })
   deleteAccount(@CurrentAuth() auth: AuthContext, @Body() dto: DeleteAccountDto) {
     return this.service.deleteAccount(auth.userId, dto);
