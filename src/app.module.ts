@@ -7,6 +7,7 @@ import { envSchema } from './config/env.schema';
 import { PrismaModule } from './prisma/prisma.module';
 import { FinancialModule } from './financial/financial.module';
 import { NotificationPreferencesModule } from './notifications/notification-preferences.module';
+import { TestsModule } from './tests/tests.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { NotificationPreferencesModule } from './notifications/notification-pref
     AuthModule,
     FinancialModule,
     NotificationPreferencesModule,
+    TestsModule,
   ],
 })
 export class AppModule {}
