@@ -1,11 +1,54 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, IsUUID, Length, Matches, MinLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  ArrayMaxSize,
+  ArrayUnique,
+  IsArray,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Length,
+  Matches,
+  MinLength,
+} from 'class-validator';
 export class PhoneDto {
-  @ApiProperty({ example: '+237690000000' }) @Matches(/^\+[1-9]\d{7,14}$/) phone!: string;
+  @ApiProperty({
+    description: 'Numéro de téléphone au format E.164',
+    example: '+237690000000',
+  })
+  @IsString()
+  @Matches(/^\+[1-9]\d{7,14}$/, {
+    message: 'Le numéro doit être au format E.164, ex. +237690000000',
+  })
+  phone!: string;
 }
 export class RegisterDto extends PhoneDto {
-  @ApiProperty({ minLength: 8 }) @IsString() @MinLength(8) password!: string;
-  @ApiProperty({ example: 'CM' }) @Matches(/^[A-Z]{2}$/) countryCode!: string;
+  @ApiProperty({ minLength: 8 })
+  @IsString()
+  @MinLength(8)
+  password!: string;
+
+  @ApiProperty({ example: 'CM' })
+  @IsString()
+  @Matches(/^[A-Z]{2}$/)
+  countryCode!: string;
+
+  @ApiPropertyOptional({
+    description: 'Jusqu’à deux numéros supplémentaires au format E.164',
+    type: [String],
+    maxItems: 2,
+    example: ['+237699887766', '+237655443322'],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(2)
+  @ArrayUnique()
+  @IsString({ each: true })
+  @Matches(/^\+[1-9]\d{7,14}$/, {
+    each: true,
+    message: 'Chaque numéro supplémentaire doit être au format E.164',
+  })
+  additionalPhones?: string[];
 }
 export class LoginDto extends PhoneDto {
   @ApiProperty() @IsString() password!: string;
