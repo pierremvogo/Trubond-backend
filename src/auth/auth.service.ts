@@ -200,6 +200,10 @@ export class AuthService {
 
   /**
    * 1. INSCRIPTION
+   *
+   * Enregistre entre 1 et 3 numéros.
+   * Aucun numéro n'est considéré comme vérifié.
+   * Déclenche l'OTP du numéro principal.
    */
   async register(dto: RegisterDto, channelToken?: string) {
     this.assertDevOtpEnabled();
@@ -210,41 +214,90 @@ export class AuthService {
 
     this.logger.log('REGISTER: début');
 
+    const phoneRegex = /^\+[1-9]\d{7,14}$/;
+
     const phone = dto.phone.trim();
 
-    if (!/^\+[1-9]\d{7,14}$/.test(phone)) {
-      throw new BadRequestException('Numéro attendu au format E.164, ex. +2376XXXXXXXX');
+    const additionalPhones = (dto.additionalPhones ?? []).map((value) => value.trim());
+
+    const allPhones = [phone, ...additionalPhones];
+
+    if (additionalPhones.length > 2 || allPhones.some((value) => !phoneRegex.test(value))) {
+      throw new BadRequestException(
+        'Vous devez fournir entre 1 et 3 numéros valides au format E.164',
+      );
     }
 
-    const phoneHmac = this.phoneKey(phone);
+    if (new Set(allPhones).size !== allPhones.length) {
+      throw new BadRequestException('Chaque numéro de téléphone doit être différent');
+    }
 
-    const existing = await this.prisma.user.findUnique({
-      where: { phoneHmac },
-    });
+    const phoneRecords = allPhones?.map((value, index) => ({
+      phone: value,
+      phoneHmac: this.phoneKey(value),
+      phoneEnc: encrypt(value),
+      isPrimary: index === 0,
+    }));
 
-    if (existing) {
-      // Ne jamais permettre à une inscription de remplacer
-      // le mot de passe d'un compte existant sans preuve
-      // d'autorisation, même s'il n'est pas confirmé.
-      throw new ConflictException('Ce numéro est déjà enregistré');
+    const primaryRecord = phoneRecords[0];
+
+    if (!primaryRecord) {
+      throw new BadRequestException('Le numéro principal est obligatoire');
+    }
+
+    const phoneHmacs = phoneRecords.map((record) => record.phoneHmac);
+
+    // Vérifier les numéros déjà enregistrés.
+    const [existingUsers, existingPhones] = await Promise.all([
+      this.prisma.user.findMany({
+        where: {
+          phoneHmac: { in: phoneHmacs },
+        },
+        select: { id: true },
+      }),
+      this.prisma.userPhone.findMany({
+        where: {
+          phoneHmac: { in: phoneHmacs },
+        },
+        select: { id: true },
+      }),
+    ]);
+
+    if (existingUsers.length > 0 || existingPhones.length > 0) {
+      throw new ConflictException('Un ou plusieurs numéros sont déjà enregistrés');
     }
 
     const passwordHash = await hashPassword(dto.password);
 
-    await this.prisma.user.create({
+    // Créer le compte et les numéros ensemble.
+    const user = await this.prisma.user.create({
       data: {
-        phoneHmac,
-        phoneEnc: encrypt(phone),
+        phoneHmac: primaryRecord.phoneHmac,
+        phoneEnc: primaryRecord.phoneEnc,
         countryCode: dto.countryCode,
         passwordHash,
+        phoneVerifiedAt: null,
+
+        phones: {
+          create: phoneRecords.map((record) => ({
+            phoneHmac: record.phoneHmac,
+            phoneEnc: record.phoneEnc,
+            isPrimary: record.isPrimary,
+            verifiedAt: null,
+          })),
+        },
+      },
+      select: {
+        id: true,
       },
     });
 
-    this.logger.log('REGISTER: utilisateur créé');
+    this.logger.log(`REGISTER: utilisateur créé avec ${allPhones.length} numéro(s)`);
 
+    // OTP uniquement sur le numéro principal.
     const otp = await this.issueOtp(phone, OtpPurpose.SIGN_UP, channelToken);
 
-    this.logger.log('REGISTER: OTP demandé');
+    this.logger.log('REGISTER: OTP principal demandé');
 
     return {
       challengeId: otp.challengeId,
@@ -254,11 +307,18 @@ export class AuthService {
 
   /**
    * 2. CONFIRMATION INSCRIPTION
+   *
+   * Vérifie l'OTP du numéro principal.
+   * Synchronise User et UserPhone.
+   * Crée une session après validation.
    */
   async verifySignup(dto: VerifyDto) {
     const userId = await this.prisma.$transaction(async (tx) => {
       const phoneHmac = await this.consumeOtp(tx, dto.challengeId, dto.code, OtpPurpose.SIGN_UP);
 
+      // Important :
+      // Retourner null sans lever d'exception ici
+      // permet de conserver les tentatives OTP incorrectes.
       if (!phoneHmac) {
         return null;
       }
@@ -271,12 +331,31 @@ export class AuthService {
         throw new UnauthorizedException();
       }
 
+      const now = new Date();
+
+      // Vérifier le numéro principal dans User.
       await tx.user.update({
         where: { id: user.id },
         data: {
-          phoneVerifiedAt: new Date(),
+          phoneVerifiedAt: now,
         },
       });
+
+      // Synchroniser le numéro principal dans UserPhone.
+      const updated = await tx.userPhone.updateMany({
+        where: {
+          userId: user.id,
+          phoneHmac,
+          isPrimary: true,
+        },
+        data: {
+          verifiedAt: now,
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new Error('Incohérence : numéro principal absent ou dupliqué dans UserPhone');
+      }
 
       return user.id;
     });
