@@ -15,6 +15,7 @@ import {
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { PaymentFeeService } from './payment-fee.service';
 import { StripeService } from './stripe.service';
 
 @Injectable()
@@ -22,11 +23,28 @@ export class StripePaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stripe: StripeService,
+    private readonly paymentFees: PaymentFeeService,
   ) {}
 
   async createPaymentIntent(userId: string, testId: string) {
-    // Réserver une tentative sous verrou PostgreSQL.
-    // Les webhooks utiliseront le même verrou par test.
+    // Prélecture : utile pour calculer le devis sans
+    // effectuer d'appel Stripe dans une transaction DB.
+    const initialTest = await this.prisma.test.findFirst({
+      where: { id: testId, initiatorId: userId },
+      select: {
+        id: true,
+        currency: true,
+        totalAmount: true,
+        initiator: {
+          select: { countryCode: true },
+        },
+      },
+    });
+
+    if (!initialTest) {
+      throw new NotFoundException('Test introuvable');
+    }
+
     const reservation = await this.prisma.$transaction(
       async (tx) => {
         await tx.$executeRaw`
@@ -40,8 +58,12 @@ export class StripePaymentsService {
           select: {
             id: true,
             status: true,
-            totalAmount: true,
             currency: true,
+            totalAmount: true,
+            serviceFeeAmount: true,
+            initiator: {
+              select: { countryCode: true },
+            },
           },
         });
 
@@ -57,12 +79,6 @@ export class StripePaymentsService {
           throw new ConflictException('Devise non prise en charge');
         }
 
-        const amount = Number(test.totalAmount);
-
-        if (!Number.isSafeInteger(amount) || amount <= 0) {
-          throw new ConflictException('Montant de paiement invalide');
-        }
-
         const latest = await tx.payment.findFirst({
           where: {
             testId,
@@ -75,26 +91,83 @@ export class StripePaymentsService {
           throw new ConflictException('Paiement déjà confirmé');
         }
 
-        // Une tentative annulée définitivement peut
-        // être remplacée par une nouvelle tentative.
-        // Les autres sont reprises.
-        const payment =
-          latest && latest.status !== PaymentStatus.CANCELLED
-            ? latest
-            : await tx.payment.create({
-                data: {
-                  testId,
-                  provider: PaymentProvider.STRIPE,
-                  methodType: PaymentMethodType.CARD,
-                  status: PaymentStatus.CREATED,
-                  amount: test.totalAmount,
-                  currency: test.currency,
-                  idempotencyKey: `tb-${randomUUID()}`,
-                },
-              });
+        let payment = latest;
 
-        if (payment.amount !== test.totalAmount || payment.currency !== test.currency) {
-          throw new ConflictException('Montant enregistré incohérent');
+        if (!payment || payment.status === PaymentStatus.CANCELLED) {
+          // Le tarif est lu dans la même transaction.
+          // Il doit être actif et applicable à Stripe.
+          const now = new Date();
+
+          const schedule = await tx.feeSchedule.findFirst({
+            where: {
+              countryCode: test.initiator.countryCode,
+              currency: test.currency,
+              provider: PaymentProvider.STRIPE,
+              operationType: 'COLLECTION',
+              active: true,
+              effectiveFrom: { lte: now },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }],
+            },
+            orderBy: [{ effectiveFrom: 'desc' }, { version: 'desc' }],
+          });
+
+          if (!schedule) {
+            throw new ConflictException('Aucun tarif COLLECTION Stripe actif pour ce pays');
+          }
+
+          // Calcul exact avec BigInt.
+          // Hypothèse : les frais sont prélevés
+          // sur le montant total encaissé.
+          const rate = BigInt(schedule.rateBps);
+          const fixed = schedule.fixedAmount;
+
+          if (fixed < 0n || rate < 0n || rate >= 10000n) {
+            throw new ConflictException('Tarif opérateur invalide');
+          }
+
+          const numerator = (test.totalAmount + fixed) * 10000n;
+
+          const denominator = 10000n - rate;
+
+          const total = (numerator + denominator - 1n) / denominator;
+
+          const operatorFee = total - test.totalAmount;
+
+          if (total <= 0n || total > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new ConflictException('Montant Stripe invalide');
+          }
+
+          payment = await tx.payment.create({
+            data: {
+              testId,
+              provider: PaymentProvider.STRIPE,
+              methodType: PaymentMethodType.CARD,
+              status: PaymentStatus.CREATED,
+              amount: total,
+              currency: test.currency,
+              idempotencyKey: `tb-${randomUUID()}`,
+              feeScheduleId: schedule.id,
+              providerFeeAmount: operatorFee,
+              providerFeeActualAmount: null,
+              serviceFeeAmount: test.serviceFeeAmount,
+            },
+          });
+        }
+
+        // Un devis déjà réservé ne doit pas être
+        // recalculé à partir du tarif du jour.
+        if (
+          payment.currency !== test.currency ||
+          payment.serviceFeeAmount !== test.serviceFeeAmount ||
+          payment.amount !== test.totalAmount + payment.providerFeeAmount
+        ) {
+          throw new ConflictException('Montants du paiement incohérents');
+        }
+
+        const amount = Number(payment.amount);
+
+        if (!Number.isSafeInteger(amount) || amount <= 0) {
+          throw new ConflictException('Montant de paiement invalide');
         }
 
         return { test, payment, amount };
@@ -106,7 +179,7 @@ export class StripePaymentsService {
 
     const { test, payment, amount } = reservation;
 
-    // Aucun appel réseau Stripe dans la transaction DB.
+    // Appel réseau hors transaction PostgreSQL.
     const intent = payment.providerReference
       ? await this.stripe.client.paymentIntents.retrieve(payment.providerReference)
       : await this.stripe.client.paymentIntents.create(
@@ -136,8 +209,6 @@ export class StripePaymentsService {
     }
 
     if (intent.status === 'succeeded' || intent.status === 'canceled') {
-      // Ne pas présenter un PaymentIntent terminé.
-      // Un webhook peut encore être en cours.
       throw new ConflictException('PaymentIntent terminé. Actualisez le statut du test.');
     }
 
@@ -188,8 +259,6 @@ export class StripePaymentsService {
           where: { id: payment.id },
           data: {
             providerReference: intent.id,
-            // Une erreur de paiement antérieure
-            // n'empêche pas de réessayer le même intent.
             status: PaymentStatus.PENDING,
           },
         });
@@ -230,8 +299,11 @@ export class StripePaymentsService {
       testId,
       paymentId: payment.id,
       clientSecret: intent.client_secret,
-      amount: test.totalAmount.toString(),
-      currency: test.currency,
+      amount: payment.amount.toString(),
+      currency: payment.currency,
+      rewardAmount: (test.totalAmount - test.serviceFeeAmount).toString(),
+      serviceFeeAmount: payment.serviceFeeAmount.toString(),
+      providerFeeAmount: payment.providerFeeAmount.toString(),
     };
   }
 }
