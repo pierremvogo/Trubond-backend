@@ -716,6 +716,9 @@ model Payment {
   confirmedAt          DateTime?             @map("confirmed_at") @db.Timestamptz(6)
   createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  providerFeeAmount BigInt @default(0) @map("provider_fee_amount")
+  providerFeeActualAmount BigInt? @map("provider_fee_actual_amount")
+  serviceFeeAmount BigInt @default(0) @map("service_fee_amount")
   test                 Test                  @relation(fields: [testId], references: [id], onDelete: Restrict)
   feeSchedule          FeeSchedule?          @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
   webhooks             WebhookEvent[]
