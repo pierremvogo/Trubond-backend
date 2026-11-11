@@ -10,6 +10,7 @@ import { NotificationPreferencesModule } from './notifications/notification-pref
 import { TestsModule } from './tests/tests.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OutboxModule } from './outbox/outbox.module';
+import { InvitationsModule } from './invitations/invitations.module';
 
 @Module({
   imports: [
@@ -48,6 +49,7 @@ import { OutboxModule } from './outbox/outbox.module';
     TestsModule,
     PaymentsModule,
     OutboxModule,
+    InvitationsModule,
   ],
 })
 export class AppModule {}

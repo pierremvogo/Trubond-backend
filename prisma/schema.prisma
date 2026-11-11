@@ -674,22 +674,24 @@ model TestEvent {
 }
 
 model Invitation {
-  id                  String            @id @default(uuid()) @db.Uuid
-  testId              String            @map("test_id") @db.Uuid
-  tokenHash           String            @unique @map("token_hash") @db.VarChar(128)
+  id                  String               @id @default(uuid()) @db.Uuid
+  testId              String               @map("test_id") @db.Uuid
+  tokenHash           String               @unique @map("token_hash") @db.VarChar(128)
   channel             InvitationChannel
-  status              InvitationStatus  @default(CREATED)
-  expiresAt           DateTime?         @map("expires_at") @db.Timestamptz(6)
-  sentAt              DateTime?         @map("sent_at") @db.Timestamptz(6)
-  deliveredAt         DateTime?         @map("delivered_at") @db.Timestamptz(6)
-  openedAt            DateTime?         @map("opened_at") @db.Timestamptz(6)
-  revokedAt           DateTime?         @map("revoked_at") @db.Timestamptz(6)
-  providerRef         String?           @map("provider_ref") @db.VarChar(255)
+  status              InvitationStatus     @default(CREATED)
+  tokenEncrypted      String?              @map("token_encrypted") @db.Text
+  expiresAt           DateTime?            @map("expires_at") @db.Timestamptz(6)
+  sentAt              DateTime?            @map("sent_at") @db.Timestamptz(6)
+  deliveredAt         DateTime?            @map("delivered_at") @db.Timestamptz(6)
+  openedAt            DateTime?            @map("opened_at") @db.Timestamptz(6)
+  revokedAt           DateTime?            @map("revoked_at") @db.Timestamptz(6)
+  providerRef         String?              @map("provider_ref") @db.VarChar(255)
   // Preuve que le destinataire contrôle le numéro invité, sans compte obligatoire.
-  recipientVerifiedAt DateTime?         @map("recipient_verified_at") @db.Timestamptz(6)
-  acceptedAt          DateTime?         @map("accepted_at") @db.Timestamptz(6)
-  createdAt           DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  test                Test              @relation(fields: [testId], references: [id], onDelete: Restrict)
+  recipientVerifiedAt DateTime?            @map("recipient_verified_at") @db.Timestamptz(6)
+  acceptedAt          DateTime?            @map("accepted_at") @db.Timestamptz(6)
+  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  test                Test                 @relation(fields: [testId], references: [id], onDelete: Restrict)
+  deliveries          InvitationDelivery[]
 
   @@index([testId, createdAt])
   @@index([status, expiresAt])
@@ -701,30 +703,30 @@ model Invitation {
 // ----------------------------------------------------------------------------
 
 model Payment {
-  id                   String                @id @default(uuid()) @db.Uuid
-  testId               String                @map("test_id") @db.Uuid
-  provider             PaymentProvider // [CHANGED]
-  methodType           PaymentMethodType     @map("method_type")
-  status               PaymentStatus         @default(CREATED)
-  amount               BigInt
-  currency             String                @db.Char(3)
-  idempotencyKey       String                @map("idempotency_key") @db.VarChar(128)
-  feeScheduleId        String?               @map("fee_schedule_id") @db.Uuid
-  providerReference    String?               @map("provider_reference") @db.VarChar(255)
-  failureCode          String?               @map("failure_code") @db.VarChar(100)
-  failureMessage       String?               @map("failure_message") @db.VarChar(500)
-  confirmedAt          DateTime?             @map("confirmed_at") @db.Timestamptz(6)
-  createdAt            DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
-  providerFeeAmount BigInt @default(0) @map("provider_fee_amount")
-  providerFeeActualAmount BigInt? @map("provider_fee_actual_amount")
-  serviceFeeAmount BigInt @default(0) @map("service_fee_amount")
-  test                 Test                  @relation(fields: [testId], references: [id], onDelete: Restrict)
-  feeSchedule          FeeSchedule?          @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
-  webhooks             WebhookEvent[]
-  ledgerTransactions   LedgerTransaction[]
-  reconciliationBreaks ReconciliationBreak[]
-  refunds              Refund[]
+  id                      String                @id @default(uuid()) @db.Uuid
+  testId                  String                @map("test_id") @db.Uuid
+  provider                PaymentProvider // [CHANGED]
+  methodType              PaymentMethodType     @map("method_type")
+  status                  PaymentStatus         @default(CREATED)
+  amount                  BigInt
+  currency                String                @db.Char(3)
+  idempotencyKey          String                @map("idempotency_key") @db.VarChar(128)
+  feeScheduleId           String?               @map("fee_schedule_id") @db.Uuid
+  providerReference       String?               @map("provider_reference") @db.VarChar(255)
+  failureCode             String?               @map("failure_code") @db.VarChar(100)
+  failureMessage          String?               @map("failure_message") @db.VarChar(500)
+  confirmedAt             DateTime?             @map("confirmed_at") @db.Timestamptz(6)
+  createdAt               DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  providerFeeAmount       BigInt                @default(0) @map("provider_fee_amount")
+  providerFeeActualAmount BigInt?               @map("provider_fee_actual_amount")
+  serviceFeeAmount        BigInt                @default(0) @map("service_fee_amount")
+  test                    Test                  @relation(fields: [testId], references: [id], onDelete: Restrict)
+  feeSchedule             FeeSchedule?          @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
+  webhooks                WebhookEvent[]
+  ledgerTransactions      LedgerTransaction[]
+  reconciliationBreaks    ReconciliationBreak[]
+  refunds                 Refund[]
 
   @@unique([provider, idempotencyKey])
   @@unique([provider, providerReference])
@@ -1476,4 +1478,31 @@ model ReferralReward {
   @@unique([referralId, ruleVersion])
   @@index([status, createdAt])
   @@map("referral_rewards")
+}
+
+model InvitationDelivery {
+  id           String @id @default(uuid()) @db.Uuid
+  invitationId String @map("invitation_id") @db.Uuid
+
+  channel NotificationChannel
+  status  NotificationStatus  @default(QUEUED)
+
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now()) @map("available_at") @db.Timestamptz(6)
+  lockedAt    DateTime? @map("locked_at") @db.Timestamptz(6)
+
+  providerRef String? @map("provider_ref") @db.VarChar(255)
+  lastError   String? @map("last_error") @db.Text
+
+  sentAt      DateTime? @map("sent_at") @db.Timestamptz(6)
+  deliveredAt DateTime? @map("delivered_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  invitation Invitation @relation(fields: [invitationId], references: [id], onDelete: Restrict)
+
+  @@index([status, availableAt])
+  @@index([invitationId, createdAt])
+  @@map("invitation_deliveries")
 }
