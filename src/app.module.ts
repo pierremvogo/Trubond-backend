@@ -9,6 +9,7 @@ import { FinancialModule } from './financial/financial.module';
 import { NotificationPreferencesModule } from './notifications/notification-preferences.module';
 import { TestsModule } from './tests/tests.module';
 import { PaymentsModule } from './payments/payments.module';
+import { OutboxModule } from './outbox/outbox.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { PaymentsModule } from './payments/payments.module';
     NotificationPreferencesModule,
     TestsModule,
     PaymentsModule,
+    OutboxModule,
   ],
 })
 export class AppModule {}
