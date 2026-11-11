@@ -56,95 +56,120 @@ export class InvitationsService {
   }
 
   async createInvitationForFundedTest(testId: string): Promise<string> {
-    await this.verifyFundedTest(testId);
+    return this.prisma.$transaction(
+      async (tx) => {
+        // Verrouiller le test pour sérialiser les créations
+        // d'invitations concernant le même test.
+        const lockedTests = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT id
+          FROM tests
+          WHERE id = ${testId}::uuid
+          FOR UPDATE
+        `;
 
-    const now = new Date();
+        if (lockedTests.length === 0) {
+          throw new NotFoundException('Test introuvable');
+        }
 
-    // Vérifier si une invitation active existe déjà.
-    const existing = await this.prisma.invitation.findFirst({
-      where: {
-        testId,
-        status: { in: this.activeStatuses },
-      },
-      orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        expiresAt: true,
-      },
-    });
-
-    if (existing) {
-      // L'index unique empêche de créer une autre invitation
-      // tant que l'ancienne possède un statut actif.
-      if (!existing.expiresAt || existing.expiresAt > now) {
-        return existing.id;
-      }
-
-      // Une invitation expirée doit être marquée EXPIRED
-      // avant d'en créer une nouvelle.
-      await this.prisma.invitation.updateMany({
-        where: {
-          id: existing.id,
-          status: { in: this.activeStatuses },
-          expiresAt: { lte: now },
-        },
-        data: {
-          status: InvitationStatus.EXPIRED,
-          tokenEncrypted: null,
-        },
-      });
-    }
-
-    const { token, tokenHash } = this.tokenService.generate();
-
-    const tokenEncrypted = this.cryptoService.encrypt(token);
-
-    const expiresAt = new Date(Date.now() + this.invitationValidityMs);
-
-    try {
-      const invitation = await this.prisma.invitation.create({
-        data: {
-          testId,
-          tokenHash,
-          tokenEncrypted,
-          channel: InvitationChannel.WHATSAPP,
-          status: InvitationStatus.QUEUED,
-          expiresAt,
-
-          deliveries: {
-            create: {
-              channel: NotificationChannel.WHATSAPP,
-              status: NotificationStatus.QUEUED,
-              availableAt: new Date(),
-            },
+        // Vérifier le financement à l'intérieur de la transaction.
+        const test = await tx.test.findUnique({
+          where: { id: testId },
+          select: {
+            status: true,
+            recipientPhoneHmac: true,
+            recipientPhoneEnc: true,
           },
-        },
-        select: {
-          id: true,
-        },
-      });
+        });
 
-      // Prisma crée l'invitation et sa livraison
-      // de manière atomique grâce à l'écriture imbriquée.
-      return invitation.id;
-    } catch (error) {
-      // En cas de traitement concurrent du même événement,
-      // l'index unique peut déclencher une erreur P2002.
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        const concurrentInvitation = await this.prisma.invitation.findFirst({
+        if (!test) {
+          throw new NotFoundException('Test introuvable');
+        }
+
+        if (test.status !== TestStatus.FUNDED) {
+          throw new ConflictException(
+            'Le test doit être financé avant la création de son invitation',
+          );
+        }
+
+        if (!test.recipientPhoneHmac || !test.recipientPhoneEnc) {
+          throw new ConflictException('Le numéro du destinataire est absent');
+        }
+
+        const now = new Date();
+
+        const existing = await tx.invitation.findFirst({
           where: {
             testId,
             status: { in: this.activeStatuses },
           },
-          select: { id: true },
+          orderBy: { createdAt: 'desc' },
+          select: {
+            id: true,
+            expiresAt: true,
+          },
         });
 
-        if (concurrentInvitation) {
-          return concurrentInvitation.id;
-        }
-      }
+        if (existing) {
+          if (!existing.expiresAt || existing.expiresAt > now) {
+            return existing.id;
+          }
 
-      throw error;
-    }
+          // L'invitation expirée ne doit plus être envoyée.
+          await tx.invitation.update({
+            where: { id: existing.id },
+            data: {
+              status: InvitationStatus.EXPIRED,
+              tokenEncrypted: null,
+            },
+          });
+
+          // Désactiver ses livraisons encore en attente.
+          await tx.invitationDelivery.updateMany({
+            where: {
+              invitationId: existing.id,
+              status: NotificationStatus.QUEUED,
+            },
+            data: {
+              status: NotificationStatus.SKIPPED,
+            },
+          });
+        }
+
+        const { token, tokenHash } = this.tokenService.generate();
+
+        const tokenEncrypted = this.cryptoService.encrypt(token);
+
+        const expiresAt = new Date(now.getTime() + this.invitationValidityMs);
+
+        const invitation = await tx.invitation.create({
+          data: {
+            testId,
+            tokenHash,
+            tokenEncrypted,
+            channel: InvitationChannel.WHATSAPP,
+            status: InvitationStatus.QUEUED,
+            expiresAt,
+
+            deliveries: {
+              create: {
+                channel: NotificationChannel.WHATSAPP,
+                status: NotificationStatus.QUEUED,
+                availableAt: now,
+              },
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        return invitation.id;
+      },
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+        maxWait: 10000,
+        timeout: 15000,
+      },
+    );
   }
 }
