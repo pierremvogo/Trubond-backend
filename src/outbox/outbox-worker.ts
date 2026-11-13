@@ -46,12 +46,26 @@ async function main(): Promise<void> {
 
   const mode = process.env.OUTBOX_WORKER_MODE;
 
-  if (mode !== 'INSPECT' && mode !== 'INSPECT_LOOP' && mode !== 'PROCESS_ONCE') {
-    throw new Error('Mode non autorisé : utiliser INSPECT, INSPECT_LOOP ou PROCESS_ONCE');
+  if (
+    mode !== 'INSPECT' &&
+    mode !== 'INSPECT_LOOP' &&
+    mode !== 'PROCESS_ONCE' &&
+    mode !== 'PROCESS_LOOP'
+  ) {
+    throw new Error(
+      'Mode non autorisé : utiliser INSPECT, INSPECT_LOOP, PROCESS_ONCE ou PROCESS_LOOP',
+    );
   }
 
-  if (mode === 'PROCESS_ONCE' && process.env.CONFIRM_OUTBOX_PROCESSING !== 'YES') {
+  if (
+    (mode === 'PROCESS_ONCE' || mode === 'PROCESS_LOOP') &&
+    process.env.CONFIRM_OUTBOX_PROCESSING !== 'YES'
+  ) {
     throw new Error('Traitement interdit : CONFIRM_OUTBOX_PROCESSING doit être YES');
+  }
+
+  if (mode === 'PROCESS_LOOP' && process.env.CONFIRM_OUTBOX_LOOP !== 'YES') {
+    throw new Error('Traitement continu interdit : CONFIRM_OUTBOX_LOOP doit être YES');
   }
 
   const app = await NestFactory.createApplicationContext(OutboxWorkerModule, {
@@ -60,6 +74,36 @@ async function main(): Promise<void> {
 
   try {
     const processor = app.get(OutboxProcessor);
+
+    if (mode === 'PROCESS_LOOP') {
+      console.log('Worker Outbox : traitement continu activé');
+
+      while (!stopRequested) {
+        try {
+          const eventIds = await processor.findPendingFundedEventIds(1);
+
+          const eventId = eventIds[0];
+
+          if (eventId && !stopRequested) {
+            const success = await processor.processOneFundedEvent(eventId);
+
+            if (!success) {
+              console.warn(`Événement ${eventId} non traité`);
+            }
+          }
+        } catch (error: unknown) {
+          console.error(
+            'Erreur pendant le traitement Outbox :',
+            error instanceof Error ? error.message : 'Erreur inconnue',
+          );
+        }
+
+        await sleep(60_000);
+      }
+
+      console.log('Worker Outbox : traitement continu arrêté');
+      return;
+    }
 
     if (mode === 'INSPECT_LOOP') {
       console.log('Worker Outbox : inspection continue activée');
@@ -97,6 +141,12 @@ async function main(): Promise<void> {
     }
 
     console.log('Recherche d’un événement test.funded disponible');
+
+    const recoveredCount = await processor.recoverStuckFundedEvents();
+
+    if (recoveredCount > 0) {
+      console.log(`Récupération Outbox : ${recoveredCount} événement(s) débloqué(s) ou clôturé(s)`);
+    }
 
     const eventIds = await processor.findPendingFundedEventIds(1);
 
