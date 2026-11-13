@@ -5,6 +5,33 @@ import { NestFactory } from '@nestjs/core';
 import { OutboxWorkerModule } from './outbox-worker.module';
 import { OutboxProcessor } from './outbox.processor';
 
+let stopRequested = false;
+
+process.once('SIGTERM', () => {
+  console.log('Signal SIGTERM reçu : arrêt du worker demandé');
+  stopRequested = true;
+});
+
+process.once('SIGINT', () => {
+  console.log('Signal SIGINT reçu : arrêt du worker demandé');
+  stopRequested = true;
+});
+
+async function sleep(milliseconds: number): Promise<void> {
+  const interval = 1_000;
+  let elapsed = 0;
+
+  while (elapsed < milliseconds && !stopRequested) {
+    const waitTime = Math.min(interval, milliseconds - elapsed);
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, waitTime);
+    });
+
+    elapsed += waitTime;
+  }
+}
+
 async function main(): Promise<void> {
   if (process.env.ENABLE_OUTBOX_WORKER !== 'YES') {
     console.log('Worker Outbox désactivé : ENABLE_OUTBOX_WORKER doit être YES');
@@ -19,8 +46,8 @@ async function main(): Promise<void> {
 
   const mode = process.env.OUTBOX_WORKER_MODE;
 
-  if (mode !== 'INSPECT' && mode !== 'PROCESS_ONCE') {
-    throw new Error('Mode non autorisé : utiliser INSPECT ou PROCESS_ONCE');
+  if (mode !== 'INSPECT' && mode !== 'INSPECT_LOOP' && mode !== 'PROCESS_ONCE') {
+    throw new Error('Mode non autorisé : utiliser INSPECT, INSPECT_LOOP ou PROCESS_ONCE');
   }
 
   if (mode === 'PROCESS_ONCE' && process.env.CONFIRM_OUTBOX_PROCESSING !== 'YES') {
@@ -33,6 +60,30 @@ async function main(): Promise<void> {
 
   try {
     const processor = app.get(OutboxProcessor);
+
+    if (mode === 'INSPECT_LOOP') {
+      console.log('Worker Outbox : inspection continue activée');
+
+      while (!stopRequested) {
+        try {
+          const count = await processor.inspectPendingEvents();
+
+          console.log(
+            `Inspection terminée : ${count} événement(s) en attente. Aucun événement traité.`,
+          );
+        } catch (error: unknown) {
+          console.error(
+            'Erreur pendant l’inspection Outbox :',
+            error instanceof Error ? error.message : 'Erreur inconnue',
+          );
+        }
+
+        await sleep(60_000);
+      }
+
+      console.log('Worker Outbox : arrêt propre terminé');
+      return;
+    }
 
     if (mode === 'INSPECT') {
       console.log('Inspection des événements Outbox en attente');
