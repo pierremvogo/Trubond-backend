@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 
 import { OutboxWorkerModule } from './outbox-worker.module';
 import { OutboxProcessor } from './outbox.processor';
+import { runOutboxWorkerCycle } from './outbox-worker-cycle';
 
 let stopRequested = false;
 
@@ -75,22 +76,14 @@ async function main(): Promise<void> {
   try {
     const processor = app.get(OutboxProcessor);
 
+    // MODE 1 : TRAITEMENT CONTINU
+
     if (mode === 'PROCESS_LOOP') {
       console.log('Worker Outbox : traitement continu activé');
 
       while (!stopRequested) {
         try {
-          const eventIds = await processor.findPendingFundedEventIds(1);
-
-          const eventId = eventIds[0];
-
-          if (eventId && !stopRequested) {
-            const success = await processor.processOneFundedEvent(eventId);
-
-            if (!success) {
-              console.warn(`Événement ${eventId} non traité`);
-            }
-          }
+          await runOutboxWorkerCycle(processor, () => stopRequested);
         } catch (error: unknown) {
           console.error(
             'Erreur pendant le traitement Outbox :',
@@ -105,6 +98,7 @@ async function main(): Promise<void> {
       return;
     }
 
+    // MODE 2 : INSPECTION CONTINUE (LECTURE SEULE)
     if (mode === 'INSPECT_LOOP') {
       console.log('Worker Outbox : inspection continue activée');
 
@@ -129,6 +123,7 @@ async function main(): Promise<void> {
       return;
     }
 
+    // MODE 3 : INSPECTION UNIQUE (LECTURE SEULE)
     if (mode === 'INSPECT') {
       console.log('Inspection des événements Outbox en attente');
 
@@ -140,12 +135,23 @@ async function main(): Promise<void> {
       return;
     }
 
+    // MODE 4 : TRAITEMENT UNIQUE
+    if (stopRequested) {
+      console.log('Arrêt demandé : aucun traitement lancé');
+      return;
+    }
+
     console.log('Recherche d’un événement test.funded disponible');
 
     const recoveredCount = await processor.recoverStuckFundedEvents();
 
     if (recoveredCount > 0) {
       console.log(`Récupération Outbox : ${recoveredCount} événement(s) débloqué(s) ou clôturé(s)`);
+    }
+
+    if (stopRequested) {
+      console.log('Arrêt demandé : aucun traitement lancé');
+      return;
     }
 
     const eventIds = await processor.findPendingFundedEventIds(1);
@@ -159,6 +165,11 @@ async function main(): Promise<void> {
 
     if (!eventId) {
       throw new Error('Identifiant Outbox introuvable');
+    }
+
+    if (stopRequested) {
+      console.log('Arrêt demandé : aucun traitement lancé');
+      return;
     }
 
     console.log(`Traitement de l’événement ${eventId}`);
