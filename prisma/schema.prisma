@@ -1240,6 +1240,7 @@ model OutboxEvent {
   attempts      Int          @default(0)
   availableAt   DateTime     @default(now()) @map("available_at") @db.Timestamptz(6)
   lockedAt      DateTime?    @map("locked_at") @db.Timestamptz(6)
+  lockToken     String?      @map("lock_token") @db.Uuid
   publishedAt   DateTime?    @map("published_at") @db.Timestamptz(6)
   lastError     String?      @map("last_error") @db.VarChar(2000)
   createdAt     DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
