@@ -5,6 +5,10 @@ import { hmac, encrypt } from '../auth/auth.crypto';
 @Injectable()
 export class TestPhoneSecurity {
   normalize(phone: string): string {
+    if (typeof phone !== 'string') {
+      throw new BadRequestException('Numéro de téléphone invalide.');
+    }
+
     const normalized = phone.replace(/[\s().-]/g, '');
 
     if (!/^\+[1-9]\d{7,14}$/.test(normalized)) {

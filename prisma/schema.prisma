@@ -180,6 +180,7 @@ enum PaymentProvider {
   STRIPE
   PAYSTACK
   LYGOS
+  PAWAPAY
   MANUAL
 }
 
@@ -723,6 +724,7 @@ model Payment {
   serviceFeeAmount        BigInt                @default(0) @map("service_fee_amount")
   test                    Test                  @relation(fields: [testId], references: [id], onDelete: Restrict)
   feeSchedule             FeeSchedule?          @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
+  pawapayDepositRequest   PawapayDepositRequest?
   webhooks                WebhookEvent[]
   ledgerTransactions      LedgerTransaction[]
   reconciliationBreaks    ReconciliationBreak[]
@@ -1506,4 +1508,34 @@ model InvitationDelivery {
   @@index([status, availableAt])
   @@index([invitationId, createdAt])
   @@map("invitation_deliveries")
+}
+
+model PawapayDepositRequest {
+  id             String   @id @default(uuid()) @db.Uuid
+  paymentId      String   @unique @map("payment_id") @db.Uuid
+  correspondent  String   @db.VarChar(40)
+  phoneNumberEnc String   @map("phone_number_enc") @db.Text
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  initiationStatus PawapayInitiationStatus @default(RESERVED) @map("initiation_status")
+  attemptCount     Int                     @default(0) @map("attempt_count")
+  attemptToken     String?                 @map("attempt_token") @db.Uuid
+  leaseExpiresAt   DateTime?               @map("lease_expires_at") @db.Timestamptz(6)
+  lastAttemptAt    DateTime?               @map("last_attempt_at") @db.Timestamptz(6)
+  acceptedAt       DateTime?               @map("accepted_at") @db.Timestamptz(6)
+  lastErrorCode    String?                 @map("last_error_code") @db.VarChar(100)
+  updatedAt        DateTime                @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([initiationStatus, leaseExpiresAt])
+  @@map("pawapay_deposit_requests")
+}
+
+enum PawapayInitiationStatus {
+  RESERVED
+  SENDING
+  ACCEPTED
+  UNCERTAIN
+  REJECTED
 }

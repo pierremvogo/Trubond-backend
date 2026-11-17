@@ -52,8 +52,8 @@ export class WhatsappWorkerService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.deliveryService.processNext();
-    } catch (error) {
-      this.logger.error(error instanceof Error ? error.message : 'Erreur du worker WhatsApp');
+    } catch {
+      this.logger.error('Échec du cycle du worker WhatsApp');
     } finally {
       this.running = false;
 

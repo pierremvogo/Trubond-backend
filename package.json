@@ -37,6 +37,7 @@
     "@nestjs/platform-fastify": "^11.1.0",
     "@nestjs/platform-socket.io": "^11.2.7",
     "@nestjs/swagger": "^11.2.0",
+    "@nestjs/throttler": "^6.7.1",
     "@nestjs/websockets": "^11.2.7",
     "@prisma/adapter-pg": "^7.10.1",
     "@prisma/client": "^7.10.1",
