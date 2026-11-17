@@ -303,8 +303,8 @@ export class WhatsappDeliveryService {
       this.logger.log(`Livraison WhatsApp ${candidate.id} acceptée par Meta`);
 
       return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Erreur WhatsApp inconnue';
+    } catch {
+      const message = 'Échec de livraison WhatsApp : vérification manuelle requise';
 
       // Aucun renvoi automatique : le résultat de
       // l'appel externe peut être incertain.

@@ -1,8 +1,13 @@
-import { BadRequestException, Controller, Get, Query } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Post, Query } from '@nestjs/common';
 
-import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBody, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 
 import { InvitationsService } from './invitations.service';
+
+type SubmitAnswerBody = {
+  token?: string;
+  phone?: string;
+};
 
 @ApiTags('Public Invitations')
 @Controller('invitations')
@@ -29,5 +34,43 @@ export class PublicInvitationsController {
     }
 
     return this.invitationsService.resolveInvitation(token);
+  }
+
+  @Post('submit-answer')
+  @ApiOperation({
+    summary: 'Soumettre la réponse à un test TRUEBOND',
+    description:
+      'Route publique permettant au destinataire ' +
+      'de soumettre un numéro de téléphone comme réponse. ' +
+      "Le token d'invitation autorise une seule réponse définitive. " +
+      "Aucune authentification n'est requise.",
+  })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['token', 'phone'],
+      properties: {
+        token: {
+          type: 'string',
+          description: "Token sécurisé de l'invitation",
+        },
+        phone: {
+          type: 'string',
+          description: 'Numéro saisi par le destinataire au format E.164',
+          example: '+2376XXXXXXXX',
+        },
+      },
+    },
+  })
+  submitAnswer(@Body() body: SubmitAnswerBody) {
+    if (!body || typeof body.token !== 'string' || !body.token.trim()) {
+      throw new BadRequestException("Le token d'invitation est obligatoire");
+    }
+
+    if (typeof body.phone !== 'string' || !body.phone.trim()) {
+      throw new BadRequestException('Le numéro de téléphone est obligatoire');
+    }
+
+    return this.invitationsService.submitAnswer(body.token, body.phone);
   }
 }

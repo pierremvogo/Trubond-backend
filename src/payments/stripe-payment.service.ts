@@ -78,6 +78,31 @@ export class StripePaymentsService {
         if (test.currency !== 'XAF') {
           throw new ConflictException('Devise non prise en charge');
         }
+        const otherActivePayment = await tx.payment.findFirst({
+          where: {
+            testId,
+            provider: { not: PaymentProvider.STRIPE },
+            status: {
+              in: [
+                PaymentStatus.CREATED,
+                PaymentStatus.PENDING,
+                PaymentStatus.SUCCEEDED,
+                PaymentStatus.REQUIRES_REVIEW,
+              ],
+            },
+          },
+          select: {
+            id: true,
+            provider: true,
+            status: true,
+          },
+        });
+
+        if (otherActivePayment) {
+          throw new ConflictException(
+            `Un paiement ${otherActivePayment.provider} est déjà actif pour ce test`,
+          );
+        }
 
         const latest = await tx.payment.findFirst({
           where: {
