@@ -12,10 +12,16 @@ import { PaymentFeeService } from './payment-fee.service';
 import { PawapayApiService } from './pawapay/pawapay-api.service';
 import { PawapayDepositsService } from './pawapay/pawapay-deposits.service';
 import { PawapayCallbackController } from './pawapay/pawapay-callback.controller';
+import { PawapayDepositsController } from './pawapay/pawapay-deposits.controller';
 
 @Module({
   imports: [AuthModule, PrismaModule],
-  controllers: [StripePaymentController, StripeWebhookController, PawapayCallbackController],
+  controllers: [
+    StripePaymentController,
+    StripeWebhookController,
+    PawapayCallbackController,
+    PawapayDepositsController,
+  ],
   providers: [
     StripeService,
     StripePaymentsService,
