@@ -1,0 +1,61 @@
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { PaymentProvider, TestStatus } from '@prisma/client';
+
+import { PrismaService } from '../../prisma/prisma.service';
+import { PaymentFeeService } from '../payment-fee.service';
+
+@Injectable()
+export class PawapayDepositsService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly paymentFees: PaymentFeeService,
+  ) {}
+
+  async quoteDeposit(userId: string, testId: string) {
+    const test = await this.prisma.test.findFirst({
+      where: {
+        id: testId,
+        initiatorId: userId,
+      },
+      select: {
+        id: true,
+        status: true,
+        currency: true,
+        totalAmount: true,
+        serviceFeeAmount: true,
+        initiator: {
+          select: { countryCode: true },
+        },
+      },
+    });
+
+    if (!test) {
+      throw new NotFoundException('Test introuvable');
+    }
+
+    if (test.status !== TestStatus.DRAFT && test.status !== TestStatus.PAYMENT_PENDING) {
+      throw new ConflictException('Ce test ne peut plus être payé');
+    }
+
+    if (test.currency !== 'XAF' || test.initiator.countryCode !== 'CM') {
+      throw new ConflictException('pawaPay est actuellement limité au Cameroun en XAF');
+    }
+
+    const quote = await this.paymentFees.quoteCollection(
+      'CM',
+      'XAF',
+      PaymentProvider.PAWAPAY,
+      test.totalAmount,
+    );
+
+    return {
+      testId: test.id,
+      currency: quote.currency,
+      rewardAmount: (test.totalAmount - test.serviceFeeAmount).toString(),
+      serviceFeeAmount: test.serviceFeeAmount.toString(),
+      providerFeeAmount: quote.providerFeeAmount.toString(),
+      totalAmount: quote.totalAmount.toString(),
+      feeScheduleId: quote.feeScheduleId,
+    };
+  }
+}

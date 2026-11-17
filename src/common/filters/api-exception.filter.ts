@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Logger } from 'nestjs-pino';
+import { safeRequestPath } from '../utils/safe-request-path';
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
@@ -30,9 +31,9 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const correlationId = request.id ?? 'unknown';
 
     if (status >= 500) {
-      this.logger.error({ err: exception, correlationId, method: request.method, url: request.url }, 'Unhandled API exception');
+      this.logger.error({ err: exception, correlationId, method: request.method, url: safeRequestPath(request.url) }, 'Unhandled API exception');
     } else {
-      this.logger.warn({ correlationId, status, method: request.method, url: request.url }, 'API request rejected');
+      this.logger.warn({ correlationId, status, method: request.method, url: safeRequestPath(request.url) }, 'API request rejected');
     }
 
     void reply.status(status).send({
@@ -41,7 +42,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
         message: safeMessage,
         correlationId,
         timestamp: new Date().toISOString(),
-        path: request.url,
+        path: safeRequestPath(request.url),
       },
     });
   }

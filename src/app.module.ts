@@ -1,8 +1,13 @@
-import { AuthModule } from './auth/auth.module';
 import { randomUUID } from 'node:crypto';
+
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
+
+import { AuthModule } from './auth/auth.module';
+import { safeRequestPath } from './common/utils/safe-request-path';
 import { envSchema } from './config/env.schema';
 import { PrismaModule } from './prisma/prisma.module';
 import { FinancialModule } from './financial/financial.module';
@@ -19,29 +24,54 @@ import { InvitationsModule } from './invitations/invitations.module';
       cache: true,
       validate: (config) => envSchema.parse(config),
     }),
+
+    ThrottlerModule.forRoot([
+      {
+        ttl: 60_000,
+        limit: 60,
+      },
+    ]),
+
     LoggerModule.forRoot({
       pinoHttp: {
         level: process.env.LOG_LEVEL ?? 'info',
+
         genReqId: (request, response) => {
           const incoming = request.headers['x-correlation-id'];
+
           const correlationId =
             typeof incoming === 'string' && /^[a-zA-Z0-9._-]{1,128}$/.test(incoming)
               ? incoming
               : randomUUID();
+
           response.setHeader('x-correlation-id', correlationId);
+
           return correlationId;
         },
-        customProps: (request) => ({ correlationId: request.id }),
+
+        customProps: (request) => ({
+          correlationId: request.id,
+        }),
+
         redact: {
           paths: ['req.headers.authorization', 'req.headers.cookie'],
           censor: '[REDACTED]',
         },
+
         serializers: {
-          req: (request) => ({ method: request.method, url: request.url, id: request.id }),
-          res: (response) => ({ statusCode: response.statusCode }),
+          req: (request) => ({
+            method: request.method,
+            url: safeRequestPath(request.url),
+            id: request.id,
+          }),
+
+          res: (response) => ({
+            statusCode: response.statusCode,
+          }),
         },
       },
     }),
+
     PrismaModule,
     AuthModule,
     FinancialModule,
@@ -50,6 +80,13 @@ import { InvitationsModule } from './invitations/invitations.module';
     PaymentsModule,
     OutboxModule,
     InvitationsModule,
+  ],
+
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
   ],
 })
 export class AppModule {}
