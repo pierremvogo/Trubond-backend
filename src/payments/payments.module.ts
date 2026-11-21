@@ -16,9 +16,10 @@ import { PawapayRefundsService } from './pawapay/pawapay-refunds.service';
 import { PawapayRefundFinalizationService } from './pawapay/pawapay-refund-finalization.service';
 import { PawapayCallbackController } from './pawapay/pawapay-callback.controller';
 import { PawapayDepositsController } from './pawapay/pawapay-deposits.controller';
+import { ConfigModule } from '@nestjs/config';
 
 @Module({
-  imports: [AuthModule, PrismaModule],
+  imports: [AuthModule, PrismaModule, ConfigModule],
   controllers: [
     StripePaymentController,
     StripeWebhookController,
