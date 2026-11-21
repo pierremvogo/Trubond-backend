@@ -231,6 +231,95 @@ export class PawapayRefundsService {
     }
   }
 
+  // Exclusivement pour le cron Sandbox. Réservation CREATED -> PENDING
+  // avant le POST : aucun retry automatique si timeout ou crash.
+  async initiateAutomatedOne(id: string, cutoff: Date) {
+    if (
+      process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX' ||
+      process.env.OUTBOX_WORKER_MODE !== 'INSPECT_LOOP' ||
+      process.env.ENABLE_PAWAPAY_REFUND_SENDING !== 'NO' ||
+      process.env.PAWAPAY_REFUND_AUTOMATION !== 'YES'
+    ) {
+      throw new Error('Automatisation désactivée ou environnement non sécurisé');
+    }
+    const excluded = new Set([
+      'd00fbdd9-71a8-402a-b805-70ec90e5624e', // manuel déjà finalisé
+      '3fd94c11-13bd-4479-8ee0-0c654f8ce7e6', // 21 000 XAF exclu
+    ]);
+    const summary = {
+      inspected: 1,
+      reserved: 0,
+      accepted: 0,
+      rejected: 0,
+      uncertain: 0,
+      skipped: 0,
+    };
+    if (excluded.has(id)) {
+      summary.skipped++;
+      return summary;
+    }
+    const refund = await this.loadRefund(id);
+    if (
+      !refund ||
+      refund.createdAt < cutoff ||
+      !this.isEligible(refund) ||
+      refund.status !== RefundStatus.CREATED ||
+      refund.providerReference !== null ||
+      refund.reason !== 'INVITATION_EXPIRED_24H'
+    ) {
+      summary.skipped++;
+      return summary;
+    }
+    const claim = await this.prisma.refund.updateMany({
+      where: { id, status: RefundStatus.CREATED, providerReference: null },
+      data: { status: RefundStatus.PENDING, providerReference: id },
+    });
+    if (claim.count !== 1) {
+      summary.skipped++;
+      return summary;
+    }
+    summary.reserved++;
+    // Le permis n'est créé qu'après la réservation durable.
+    // En cas de panne, PENDING reste à réconcilier ; aucun second POST.
+    try {
+      const permit = this.api.createAutomatedPermitForClaimedRefund(true);
+      const response = await this.api.initiateRefund(
+        {
+          refundId: id,
+          depositId: refund.payment!.providerReference!,
+          amount: refund.amount.toString(),
+          currency: refund.currency,
+          clientReferenceId: refund.idempotencyKey,
+        },
+        permit,
+      );
+      if (response.refundId !== id) {
+        summary.uncertain++;
+        return summary;
+      }
+      if (response.status === 'ACCEPTED' || response.status === 'DUPLICATE_IGNORED') {
+        summary.accepted++;
+        return summary;
+      }
+      if (response.status === 'REJECTED') {
+        await this.prisma.refund.updateMany({
+          where: { id, status: RefundStatus.PENDING, providerReference: id },
+          data: { status: RefundStatus.REQUIRES_REVIEW },
+        });
+        summary.rejected++;
+        return summary;
+      }
+      summary.uncertain++;
+    } catch (error) {
+      this.logger.error(
+        `Envoi automatisé ${id} incertain ; aucun renvoi`,
+        error instanceof Error ? error.message : String(error),
+      );
+      summary.uncertain++;
+    }
+    return summary;
+  }
+
   async reconcileOne(id: string) {
     const summary = {
       inspected: 1,
