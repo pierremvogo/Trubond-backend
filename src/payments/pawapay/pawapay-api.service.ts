@@ -54,7 +54,7 @@ export class PawapayApiService {
 
     const token = this.config.get<string>('PAWAPAY_API_TOKEN');
 
-    if (environment !== 'sandbox') {
+    if (environment?.trim().toUpperCase() !== 'SANDBOX') {
       throw new InternalServerErrorException('Seul pawaPay Sandbox est autorisé.');
     }
 
