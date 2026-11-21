@@ -11,6 +11,9 @@ import { DevOtpController } from './otp/dev-otp.controller';
 import { OtpGateway } from './otp/otp.gateway';
 import { SocketOtpProvider } from './otp/socket-otp.provider';
 
+// Service OTP réutilisable
+import { OtpChallengeService } from './otp/otp-challenge.service';
+
 @Module({
   imports: [],
 
@@ -26,8 +29,11 @@ import { SocketOtpProvider } from './otp/socket-otp.provider';
     DevOtpChannelService,
     OtpGateway,
     SocketOtpProvider,
+
+    // OTP pour les opérations métier
+    OtpChallengeService,
   ],
 
-  exports: [AuthService, SessionService, AccessTokenGuard],
+  exports: [AuthService, SessionService, AccessTokenGuard, OtpChallengeService],
 })
 export class AuthModule {}

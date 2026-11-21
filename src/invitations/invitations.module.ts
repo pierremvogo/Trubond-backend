@@ -9,9 +9,10 @@ import { PublicInvitationsController } from './public-invitations.controller';
 import { InvitationsService } from './invitations.service';
 import { InvitationTokenService } from './invitation-token.service';
 import { InvitationCryptoService } from './invitation-crypto.service';
+import { RewardClaimsModule } from 'src/reward-claims/reward-claims.module';
 
 @Module({
-  imports: [AuthModule, TestsModule],
+  imports: [AuthModule, TestsModule, RewardClaimsModule],
 
   controllers: [InvitationsController, PublicInvitationsController],
 
