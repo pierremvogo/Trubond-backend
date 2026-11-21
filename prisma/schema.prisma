@@ -466,7 +466,7 @@ model OtpChallenge {
   codeHash      String             @map("code_hash") @db.VarChar(255)
   purpose       OtpPurpose
   status        OtpStatus          @default(CREATED)
-  provider      MessagingProvider? // [CHANGED] était Provider
+  provider      MessagingProvider?
   providerRef   String?            @map("provider_ref") @db.VarChar(255)
   attempts      Int                @default(0)
   maxAttempts   Int                @default(5) @map("max_attempts")
@@ -474,8 +474,12 @@ model OtpChallenge {
   verifiedAt    DateTime?          @map("verified_at") @db.Timestamptz(6)
   createdAt     DateTime           @default(now()) @map("created_at") @db.Timestamptz(6)
 
+  // OTP associé à un test TrueBond
+  testId String? @map("test_id") @db.Uuid
+
   @@index([recipientHmac, purpose, createdAt])
   @@index([status, expiresAt])
+  @@index([testId, purpose, status])
   @@map("otp_challenges")
 }
 
@@ -618,6 +622,7 @@ model Test {
   disputes           Dispute[]
   referralRewards    ReferralReward[]
   supportTickets     SupportTicket[] // [NEW]
+  rewardClaim        RewardClaim?
 
   @@index([initiatorId, createdAt])
   @@index([recipientUserId, createdAt]) // [NEW]
@@ -704,26 +709,26 @@ model Invitation {
 // ----------------------------------------------------------------------------
 
 model Payment {
-  id                      String                @id @default(uuid()) @db.Uuid
-  testId                  String                @map("test_id") @db.Uuid
+  id                      String                 @id @default(uuid()) @db.Uuid
+  testId                  String                 @map("test_id") @db.Uuid
   provider                PaymentProvider // [CHANGED]
-  methodType              PaymentMethodType     @map("method_type")
-  status                  PaymentStatus         @default(CREATED)
+  methodType              PaymentMethodType      @map("method_type")
+  status                  PaymentStatus          @default(CREATED)
   amount                  BigInt
-  currency                String                @db.Char(3)
-  idempotencyKey          String                @map("idempotency_key") @db.VarChar(128)
-  feeScheduleId           String?               @map("fee_schedule_id") @db.Uuid
-  providerReference       String?               @map("provider_reference") @db.VarChar(255)
-  failureCode             String?               @map("failure_code") @db.VarChar(100)
-  failureMessage          String?               @map("failure_message") @db.VarChar(500)
-  confirmedAt             DateTime?             @map("confirmed_at") @db.Timestamptz(6)
-  createdAt               DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt               DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
-  providerFeeAmount       BigInt                @default(0) @map("provider_fee_amount")
-  providerFeeActualAmount BigInt?               @map("provider_fee_actual_amount")
-  serviceFeeAmount        BigInt                @default(0) @map("service_fee_amount")
-  test                    Test                  @relation(fields: [testId], references: [id], onDelete: Restrict)
-  feeSchedule             FeeSchedule?          @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
+  currency                String                 @db.Char(3)
+  idempotencyKey          String                 @map("idempotency_key") @db.VarChar(128)
+  feeScheduleId           String?                @map("fee_schedule_id") @db.Uuid
+  providerReference       String?                @map("provider_reference") @db.VarChar(255)
+  failureCode             String?                @map("failure_code") @db.VarChar(100)
+  failureMessage          String?                @map("failure_message") @db.VarChar(500)
+  confirmedAt             DateTime?              @map("confirmed_at") @db.Timestamptz(6)
+  createdAt               DateTime               @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime               @updatedAt @map("updated_at") @db.Timestamptz(6)
+  providerFeeAmount       BigInt                 @default(0) @map("provider_fee_amount")
+  providerFeeActualAmount BigInt?                @map("provider_fee_actual_amount")
+  serviceFeeAmount        BigInt                 @default(0) @map("service_fee_amount")
+  test                    Test                   @relation(fields: [testId], references: [id], onDelete: Restrict)
+  feeSchedule             FeeSchedule?           @relation(fields: [feeScheduleId], references: [id], onDelete: Restrict)
   pawapayDepositRequest   PawapayDepositRequest?
   webhooks                WebhookEvent[]
   ledgerTransactions      LedgerTransaction[]
@@ -1538,4 +1543,51 @@ enum PawapayInitiationStatus {
   ACCEPTED
   UNCERTAIN
   REJECTED
+}
+
+enum RewardClaimStatus {
+  PENDING_IDENTITY
+  IDENTITY_VERIFIED
+  DESTINATION_VERIFIED
+  AUTHORIZED
+  PAYOUT_PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+model RewardClaim {
+  id     String            @id @default(uuid()) @db.Uuid
+  testId String            @unique @map("test_id") @db.Uuid
+  status RewardClaimStatus @default(PENDING_IDENTITY)
+
+  // Accès temporaire à la réclamation.
+  // Seule l'empreinte du token est conservée.
+  accessTokenHash String?   @unique @map("access_token_hash") @db.VarChar(128)
+  accessExpiresAt DateTime? @map("access_expires_at") @db.Timestamptz(6)
+
+  // Vérification du numéro désigné par l'initiateur.
+  identityVerifiedAt DateTime? @map("identity_verified_at") @db.Timestamptz(6)
+
+  // Numéro Mobile Money choisi par le bénéficiaire.
+  destinationHmac String? @map("destination_hmac") @db.VarChar(128)
+  destinationEnc  String? @map("destination_enc") @db.Text
+
+  // Vérification du numéro de réception.
+  destinationVerifiedAt DateTime? @map("destination_verified_at") @db.Timestamptz(6)
+
+  // Autorisation finale du décaissement.
+  authorizedAt DateTime? @map("authorized_at") @db.Timestamptz(6)
+
+  // Durée de vie de la réclamation elle-même.
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  test Test @relation(fields: [testId], references: [id], onDelete: Restrict)
+
+  @@index([status, expiresAt])
+  @@index([testId, status])
+  @@map("reward_claims")
 }
