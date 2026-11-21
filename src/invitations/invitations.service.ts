@@ -19,6 +19,7 @@ import {
 
 import { PrismaService } from '../prisma/prisma.service';
 import { TestPhoneSecurity } from '../tests/test-phone-security.service';
+import { RewardClaimsService } from '../reward-claims/reward-claims.service';
 import { InvitationTokenService } from './invitation-token.service';
 import { InvitationCryptoService } from './invitation-crypto.service';
 
@@ -41,6 +42,7 @@ export class InvitationsService {
     private readonly tokenService: InvitationTokenService,
     private readonly cryptoService: InvitationCryptoService,
     private readonly phoneSecurity: TestPhoneSecurity,
+    private readonly rewardClaimsService: RewardClaimsService,
   ) {}
 
   private buildInvitationUrl(token: string): string {
@@ -476,6 +478,12 @@ export class InvitationsService {
           },
         });
 
+        // Créer la réclamation uniquement en cas de réponse correcte.
+        // La création et le résultat du test partagent la même transaction.
+        const rewardClaim = isCorrect
+          ? await this.rewardClaimsService.createForSuccessfulTest(tx, test.id)
+          : null;
+
         // Enregistrer le résultat dans l'outbox, dans la même transaction.
         // Le worker financier traitera cet événement séparément.
         // Aucun appel Stripe n'est effectué ici.
@@ -519,6 +527,13 @@ export class InvitationsService {
           result: isCorrect ? 'SUCCESS' : 'FAILURE',
           isCorrect,
           status: resultStatus,
+          rewardClaim: rewardClaim
+            ? {
+                claimId: rewardClaim.claimId,
+                accessToken: rewardClaim.accessToken,
+                identityVerificationRequired: true,
+              }
+            : null,
         };
       },
       {
