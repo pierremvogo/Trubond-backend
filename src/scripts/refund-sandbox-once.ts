@@ -1,189 +1,88 @@
 import 'dotenv/config';
-
 import { NestFactory } from '@nestjs/core';
 import { PaymentProvider, PaymentStatus, RefundStatus, TestStatus } from '@prisma/client';
-
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { PawapayRefundsService } from '../payments/pawapay/pawapay-refunds.service';
 
-type CommandMode = 'send' | 'reconcile';
-
+type Mode = 'send' | 'reconcile';
 const REFUND_ID = 'd00fbdd9-71a8-402a-b805-70ec90e5624e';
-
 const DEPOSIT_ID = '18bd4e4e-1dbc-4398-a069-48d75ec508b6';
 
-const EXPECTED_AMOUNT = 20000n;
-const EXPECTED_CURRENCY = 'XAF';
-
-function getMode(): CommandMode {
-  const mode = process.argv[2];
-
-  if (mode !== 'send' && mode !== 'reconcile') {
-    throw new Error('Utilisation : refund-sandbox-once.js send|reconcile');
+async function main(): Promise<void> {
+  const arg = process.argv[2];
+  if (arg !== 'send' && arg !== 'reconcile') {
+    throw new Error('Usage: node dist/scripts/refund-sandbox-once.js send|reconcile');
   }
+  const mode: Mode = arg;
 
-  return mode;
-}
-
-function assertSandbox(): void {
+  // Ce marqueur ne suffit pas à lui seul : les credentials et l'URL
+  // du client PawapayApiService doivent également pointer sur Sandbox.
   if (process.env.PAWAPAY_ENV !== 'SANDBOX') {
-    throw new Error('Opération interdite : PAWAPAY_ENV doit être SANDBOX.');
+    throw new Error('PAWAPAY_ENV=SANDBOX requis');
   }
-
-  if (process.env.ENABLE_PAWAPAY_REFUND_SENDING !== 'NO') {
+  if (
+    process.env.OUTBOX_WORKER_MODE !== 'INSPECT_LOOP' ||
+    process.env.ENABLE_PAWAPAY_REFUND_SENDING !== 'NO'
+  ) {
     throw new Error(
-      'Conserver ENABLE_PAWAPAY_REFUND_SENDING=NO ' + 'pour empêcher les envois automatiques.',
+      'Worker non sécurisé : INSPECT_LOOP et ENABLE_PAWAPAY_REFUND_SENDING=NO requis',
     );
   }
 
-  if (process.env.OUTBOX_WORKER_MODE !== 'INSPECT_LOOP') {
-    throw new Error('OUTBOX_WORKER_MODE doit être INSPECT_LOOP.');
-  }
-}
-
-async function main(): Promise<void> {
-  const mode = getMode();
-
-  assertSandbox();
-
-  const app = await NestFactory.createApplicationContext(AppModule, {
-    logger: ['error', 'warn', 'log'],
-  });
-
+  const app = await NestFactory.createApplicationContext(AppModule);
   try {
     const prisma = app.get(PrismaService);
-    const refundsService = app.get(PawapayRefundsService);
-
+    const service = app.get(PawapayRefundsService);
     const refund = await prisma.refund.findUnique({
-      where: {
-        id: REFUND_ID,
-      },
-      include: {
-        payment: true,
-        test: true,
-      },
+      where: { id: REFUND_ID },
+      include: { payment: true, test: true },
     });
-
-    if (!refund) {
-      throw new Error(`Remboursement introuvable : ${REFUND_ID}`);
-    }
-
-    if (refund.provider !== PaymentProvider.PAWAPAY) {
-      throw new Error('Le fournisseur du remboursement est incorrect.');
-    }
-
-    if (refund.amount !== EXPECTED_AMOUNT) {
-      throw new Error('Montant incorrect : 20000 XAF attendus.');
-    }
-
-    if (refund.currency !== EXPECTED_CURRENCY) {
-      throw new Error('Devise incorrecte : XAF attendu.');
-    }
-
-    if (!refund.payment) {
-      throw new Error('Paiement associé introuvable.');
-    }
-
     if (
-      refund.payment.provider !== PaymentProvider.PAWAPAY ||
-      refund.payment.status !== PaymentStatus.SUCCEEDED
+      !refund ||
+      refund.provider !== PaymentProvider.PAWAPAY ||
+      refund.amount !== 20000n ||
+      refund.currency !== 'XAF' ||
+      refund.test.rewardAmount !== 20000n ||
+      refund.payment?.provider !== PaymentProvider.PAWAPAY ||
+      refund.payment.status !== PaymentStatus.SUCCEEDED ||
+      !refund.payment.confirmedAt ||
+      refund.payment.testId !== refund.testId ||
+      refund.payment.currency !== 'XAF' ||
+      refund.payment.providerReference !== DEPOSIT_ID ||
+      refund.test.status !== TestStatus.REFUND_PENDING
     ) {
-      throw new Error('Le paiement initial doit être confirmé par pawaPay.');
+      throw new Error('Contrôle du remboursement ciblé échoué : aucun appel distant');
     }
-
-    if (refund.payment.providerReference !== DEPOSIT_ID) {
-      throw new Error('Le depositId ne correspond pas au dépôt attendu.');
-    }
-
-    if (refund.payment.testId !== refund.testId) {
-      throw new Error('Le paiement et le remboursement ne concernent pas le même test.');
-    }
-
-    if (refund.payment.currency !== EXPECTED_CURRENCY) {
-      throw new Error('La devise du paiement initial est incohérente.');
-    }
-
-    if (
-      refund.test.status !== TestStatus.REFUND_PENDING &&
-      refund.test.status !== TestStatus.REFUNDED
-    ) {
-      throw new Error('Le test ne se trouve pas dans un état compatible.');
-    }
-
-    console.log('--------------------------------');
-    console.log('TRUEBOND - REMBOURSEMENT SANDBOX');
-    console.log('--------------------------------');
-    console.log('Mode :', mode);
-    console.log('Refund ID :', refund.id);
-    console.log('Deposit ID :', DEPOSIT_ID);
-    console.log('Montant :', refund.amount.toString(), 'XAF');
-    console.log('Statut :', refund.status);
-    console.log('--------------------------------');
 
     if (mode === 'send') {
-      if (refund.status !== RefundStatus.CREATED) {
-        throw new Error('Envoi interdit : le remboursement n’est plus CREATED.');
+      if (refund.status !== RefundStatus.CREATED || refund.providerReference !== null) {
+        throw new Error('Envoi refusé : remboursement déjà réservé ou envoyé');
       }
-
-      if (refund.test.status !== TestStatus.REFUND_PENDING) {
-        throw new Error('Envoi interdit : le test n’est pas REFUND_PENDING.');
+      // Claim atomique CREATED -> PENDING effectué dans initiateOne.
+      const result = await service.initiateOne(REFUND_ID);
+      console.log('Résultat initiation :', result);
+      if (result.accepted !== 1) {
+        throw new Error(
+          'Initiation non confirmée ACCEPTED : consulter le statut, ne pas renvoyer POST',
+        );
       }
-
-      /*
-       * IMPORTANT
-       *
-       * initiatePending() accepte un nombre et traite un lot.
-       * Ne jamais lui passer REFUND_ID ni appeler
-       * initiatePending(1) pour ce test ciblé.
-       *
-       * La méthode initiateOne(refundId) doit être
-       * implémentée dans PawapayRefundsService
-       * avant de permettre cet envoi.
-       */
-
-      throw new Error(
-        'ENVOI BLOQUÉ : ajouter initiateOne(refundId) ' +
-          'dans PawapayRefundsService avant de déclencher ' +
-          'ce remboursement ciblé.',
-      );
+    } else {
+      if (refund.status !== RefundStatus.PENDING || refund.providerReference !== REFUND_ID) {
+        throw new Error('Réconciliation refusée : remboursement non PENDING');
+      }
+      const result = await service.reconcileOne(REFUND_ID);
+      console.log('Résultat réconciliation :', result);
+      if (result.errors > 0 || result.requiresReview > 0) {
+        throw new Error('Réconciliation à examiner manuellement');
+      }
     }
-
-    if (mode === 'reconcile') {
-      if (refund.status === RefundStatus.SUCCEEDED) {
-        console.log('Remboursement déjà finalisé. Aucun nouvel appel nécessaire.');
-        return;
-      }
-
-      if (refund.status !== RefundStatus.PENDING) {
-        throw new Error('Réconciliation interdite : statut PENDING attendu.');
-      }
-
-      /*
-       * reconcilePending() accepte un nombre et traite un lot.
-       * Ne pas appeler reconcilePending(1).
-       *
-       * Une méthode reconcileOne(refundId) doit être
-       * ajoutée au service avant la réconciliation ciblée.
-       */
-
-      throw new Error(
-        'RÉCONCILIATION BLOQUÉE : ajouter reconcileOne(refundId) ' + 'dans PawapayRefundsService.',
-      );
-    }
-
-    // Conserve une référence explicite au service injecté.
-    void refundsService;
   } finally {
     await app.close();
   }
 }
 
 main().catch((error: unknown) => {
-  console.error(
-    '[TRUEBOND REFUND SANDBOX]',
-    error instanceof Error ? error.message : String(error),
-  );
-
+  console.error('[REFUND SANDBOX]', error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });
