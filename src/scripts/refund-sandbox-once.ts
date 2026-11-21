@@ -15,10 +15,7 @@ async function main(): Promise<void> {
     throw new Error('Usage: node dist/scripts/refund-sandbox-once.js send|reconcile');
   }
   const mode: Mode = arg;
-
-  // Ce marqueur ne suffit pas à lui seul : les credentials et l'URL
-  // du client PawapayApiService doivent également pointer sur Sandbox.
-  if (process.env.PAWAPAY_ENV !== 'SANDBOX') {
+  if (process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX') {
     throw new Error('PAWAPAY_ENV=SANDBOX requis');
   }
   if (
@@ -29,7 +26,6 @@ async function main(): Promise<void> {
       'Worker non sécurisé : INSPECT_LOOP et ENABLE_PAWAPAY_REFUND_SENDING=NO requis',
     );
   }
-
   const app = await NestFactory.createApplicationContext(AppModule);
   try {
     const prisma = app.get(PrismaService);
@@ -50,27 +46,20 @@ async function main(): Promise<void> {
       refund.payment.testId !== refund.testId ||
       refund.payment.currency !== 'XAF' ||
       refund.payment.providerReference !== DEPOSIT_ID ||
-      refund.test.status !== TestStatus.REFUND_PENDING
+      refund.test.status !== TestStatus.REFUND_PENDING ||
+      refund.status !== RefundStatus.PENDING ||
+      refund.providerReference !== REFUND_ID
     ) {
       throw new Error('Contrôle du remboursement ciblé échoué : aucun appel distant');
     }
 
     if (mode === 'send') {
-      if (refund.status !== RefundStatus.CREATED || refund.providerReference !== null) {
-        throw new Error('Envoi refusé : remboursement déjà réservé ou envoyé');
-      }
-      // Claim atomique CREATED -> PENDING effectué dans initiateOne.
-      const result = await service.initiateOne(REFUND_ID);
-      console.log('Résultat initiation :', result);
-      if (result.accepted !== 1) {
-        throw new Error(
-          'Initiation non confirmée ACCEPTED : consulter le statut, ne pas renvoyer POST',
-        );
+      const result = await service.sendManualSandboxOnce(REFUND_ID);
+      console.log('Résultat initiation manuelle :', result);
+      if (result !== 'ACCEPTED' && result !== 'DUPLICATE_IGNORED') {
+        throw new Error('Initiation non confirmée : réconcilier, ne jamais relancer send');
       }
     } else {
-      if (refund.status !== RefundStatus.PENDING || refund.providerReference !== REFUND_ID) {
-        throw new Error('Réconciliation refusée : remboursement non PENDING');
-      }
       const result = await service.reconcileOne(REFUND_ID);
       console.log('Résultat réconciliation :', result);
       if (result.errors > 0 || result.requiresReview > 0) {
@@ -81,7 +70,6 @@ async function main(): Promise<void> {
     await app.close();
   }
 }
-
 main().catch((error: unknown) => {
   console.error('[REFUND SANDBOX]', error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
