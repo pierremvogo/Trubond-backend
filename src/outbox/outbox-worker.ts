@@ -1,34 +1,25 @@
 import 'dotenv/config';
-
 import { NestFactory } from '@nestjs/core';
-
 import { OutboxWorkerModule } from './outbox-worker.module';
 import { OutboxProcessor } from './outbox.processor';
 import { runOutboxWorkerCycle } from './outbox-worker-cycle';
+import { TestExpirationService } from '../tests/test-expiration.service';
 
 let stopRequested = false;
-
 process.once('SIGTERM', () => {
   console.log('Signal SIGTERM reçu : arrêt du worker demandé');
   stopRequested = true;
 });
-
 process.once('SIGINT', () => {
   console.log('Signal SIGINT reçu : arrêt du worker demandé');
   stopRequested = true;
 });
 
 async function sleep(milliseconds: number): Promise<void> {
-  const interval = 1_000;
   let elapsed = 0;
-
   while (elapsed < milliseconds && !stopRequested) {
-    const waitTime = Math.min(interval, milliseconds - elapsed);
-
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, waitTime);
-    });
-
+    const waitTime = Math.min(1000, milliseconds - elapsed);
+    await new Promise<void>((resolve) => setTimeout(resolve, waitTime));
     elapsed += waitTime;
   }
 }
@@ -38,15 +29,9 @@ async function main(): Promise<void> {
     console.log('Worker Outbox désactivé : ENABLE_OUTBOX_WORKER doit être YES');
     return;
   }
-
-  const databaseUrl = process.env.DATABASE_URL;
-
-  if (!databaseUrl) {
-    throw new Error('DATABASE_URL est absente');
-  }
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL est absente');
 
   const mode = process.env.OUTBOX_WORKER_MODE;
-
   if (
     mode !== 'INSPECT' &&
     mode !== 'INSPECT_LOOP' &&
@@ -57,14 +42,12 @@ async function main(): Promise<void> {
       'Mode non autorisé : utiliser INSPECT, INSPECT_LOOP, PROCESS_ONCE ou PROCESS_LOOP',
     );
   }
-
   if (
     (mode === 'PROCESS_ONCE' || mode === 'PROCESS_LOOP') &&
     process.env.CONFIRM_OUTBOX_PROCESSING !== 'YES'
   ) {
     throw new Error('Traitement interdit : CONFIRM_OUTBOX_PROCESSING doit être YES');
   }
-
   if (mode === 'PROCESS_LOOP' && process.env.CONFIRM_OUTBOX_LOOP !== 'YES') {
     throw new Error('Traitement continu interdit : CONFIRM_OUTBOX_LOOP doit être YES');
   }
@@ -72,40 +55,32 @@ async function main(): Promise<void> {
   const app = await NestFactory.createApplicationContext(OutboxWorkerModule, {
     logger: ['error', 'warn'],
   });
-
   try {
     const processor = app.get(OutboxProcessor);
-
-    // MODE 1 : TRAITEMENT CONTINU
+    const expirationService = app.get(TestExpirationService);
 
     if (mode === 'PROCESS_LOOP') {
       console.log('Worker Outbox : traitement continu activé');
-
       while (!stopRequested) {
         try {
-          await runOutboxWorkerCycle(processor, () => stopRequested);
+          await runOutboxWorkerCycle(processor, () => stopRequested, expirationService);
         } catch (error: unknown) {
           console.error(
             'Erreur pendant le traitement Outbox :',
             error instanceof Error ? error.message : 'Erreur inconnue',
           );
         }
-
         await sleep(60_000);
       }
-
       console.log('Worker Outbox : traitement continu arrêté');
       return;
     }
 
-    // MODE 2 : INSPECTION CONTINUE (LECTURE SEULE)
     if (mode === 'INSPECT_LOOP') {
       console.log('Worker Outbox : inspection continue activée');
-
       while (!stopRequested) {
         try {
           const count = await processor.inspectPendingEvents();
-
           console.log(
             `Inspection terminée : ${count} événement(s) en attente. Aucun événement traité.`,
           );
@@ -115,71 +90,54 @@ async function main(): Promise<void> {
             error instanceof Error ? error.message : 'Erreur inconnue',
           );
         }
-
         await sleep(60_000);
       }
-
       console.log('Worker Outbox : arrêt propre terminé');
       return;
     }
 
-    // MODE 3 : INSPECTION UNIQUE (LECTURE SEULE)
     if (mode === 'INSPECT') {
       console.log('Inspection des événements Outbox en attente');
-
       const count = await processor.inspectPendingEvents();
-
       console.log(`${count} événement(s) en attente`);
       console.log('Aucun événement traité');
-
       return;
     }
 
-    // MODE 4 : TRAITEMENT UNIQUE
     if (stopRequested) {
       console.log('Arrêt demandé : aucun traitement lancé');
       return;
     }
+    const result = await expirationService.processExpiredInvitations(50);
+    console.log(`Expirations : ${result.expired} test(s) passé(s) en REFUND_PENDING`);
 
+    if (stopRequested) {
+      console.log('Arrêt demandé : aucun traitement lancé');
+      return;
+    }
     console.log('Recherche d’un événement test.funded disponible');
-
     const recoveredCount = await processor.recoverStuckFundedEvents();
-
     if (recoveredCount > 0) {
       console.log(`Récupération Outbox : ${recoveredCount} événement(s) débloqué(s) ou clôturé(s)`);
     }
-
     if (stopRequested) {
       console.log('Arrêt demandé : aucun traitement lancé');
       return;
     }
-
     const eventIds = await processor.findPendingFundedEventIds(1);
-
     if (eventIds.length === 0) {
       console.log('Aucun événement disponible');
       return;
     }
-
     const eventId = eventIds[0];
-
-    if (!eventId) {
-      throw new Error('Identifiant Outbox introuvable');
-    }
-
+    if (!eventId) throw new Error('Identifiant Outbox introuvable');
     if (stopRequested) {
       console.log('Arrêt demandé : aucun traitement lancé');
       return;
     }
-
     console.log(`Traitement de l’événement ${eventId}`);
-
     const success = await processor.processOneFundedEvent(eventId);
-
-    if (!success) {
-      throw new Error('Événement non traité : vérifier son état avant de relancer');
-    }
-
+    if (!success) throw new Error('Événement non traité : vérifier son état avant de relancer');
     console.log('Événement traité avec succès');
   } finally {
     await app.close();
@@ -191,6 +149,5 @@ main().catch((error: unknown) => {
     'Erreur du worker Outbox :',
     error instanceof Error ? error.message : 'Erreur inconnue',
   );
-
   process.exitCode = 1;
 });

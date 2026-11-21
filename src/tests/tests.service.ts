@@ -24,6 +24,8 @@ export class TestsService {
   private readonly selectFields = {
     id: true,
     publicCode: true,
+    recipientPhoneEnc: true,
+    initiatorId: true,
     status: true,
     currency: true,
     rewardAmount: true,
@@ -35,22 +37,35 @@ export class TestsService {
     completedAt: true,
   } as const;
 
-  private serialize(test: {
-    id: string;
-    publicCode: string;
-    status: string;
-    currency: string;
-    rewardAmount: bigint;
-    serviceFeeAmount: bigint;
-    totalAmount: bigint;
-    createdAt: Date;
-    sentAt: Date | null;
-    expiresAt: Date | null;
-    completedAt: Date | null;
-  }) {
+  private serialize(
+    test: {
+      id: string;
+      publicCode: string;
+      initiatorId: string;
+      recipientPhoneEnc: string | null;
+      status: string;
+      currency: string;
+      rewardAmount: bigint;
+      serviceFeeAmount: bigint;
+      totalAmount: bigint;
+      createdAt: Date;
+      sentAt: Date | null;
+      expiresAt: Date | null;
+      completedAt: Date | null;
+    },
+    userId: string,
+  ) {
+    const isInitiator = test.initiatorId === userId;
+
     return {
       id: test.id,
       publicCode: test.publicCode,
+
+      recipientPhone:
+        isInitiator && test.recipientPhoneEnc
+          ? this.phoneSecurity.decrypt(test.recipientPhoneEnc)
+          : null,
+
       status: test.status,
       currency: test.currency,
       rewardAmount: test.rewardAmount.toString(),
@@ -202,29 +217,29 @@ export class TestsService {
       },
     );
 
-    return this.serialize(test);
+    return this.serialize(test, userId);
   }
 
   async listMine(userId: string) {
     const tests = await this.prisma.test.findMany({
-      where: { initiatorId: userId },
+      where: { initiatorId: userId, archivedAt: null },
       select: this.selectFields,
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
 
-    return tests.map((test) => this.serialize(test));
+    return tests.map((test) => this.serialize(test, userId));
   }
 
   async listReceived(userId: string) {
     const tests = await this.prisma.test.findMany({
-      where: { recipientUserId: userId },
+      where: { recipientUserId: userId, archivedAt: null },
       select: this.selectFields,
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
 
-    return tests.map((test) => this.serialize(test));
+    return tests.map((test) => this.serialize(test, userId));
   }
 
   async detail(userId: string, id: string) {
@@ -240,6 +255,6 @@ export class TestsService {
       throw new NotFoundException('Test introuvable');
     }
 
-    return this.serialize(test);
+    return this.serialize(test, userId);
   }
 }
