@@ -35,7 +35,18 @@ export class TestExpirationService {
       where: {
         status: { in: [TestStatus.FUNDED, TestStatus.SENT] },
         attempt: null,
-        invitations: { some: { createdAt: { lte: new Date(now.getTime() - this.validityMs) } } },
+        invitations: {
+          some: { createdAt: { lte: new Date(now.getTime() - this.validityMs) } },
+        },
+        // Ne sélectionner que les tests avec un paiement pawaPay confirmé.
+        // Les tests Stripe restent intacts pour leur futur traitement dédié.
+        payments: {
+          some: {
+            provider: PaymentProvider.PAWAPAY,
+            status: PaymentStatus.SUCCEEDED,
+            confirmedAt: { not: null },
+          },
+        },
       },
       select: { id: true },
       orderBy: { createdAt: 'asc' },
@@ -107,7 +118,7 @@ export class TestExpirationService {
           throw new Error('Montants financiers incohérents : remboursement suspendu');
         }
 
-        // Un dépôt réellement confirmé est obligatoire avant toute demande de remboursement.
+        // Un dépôt pawaPay réellement confirmé est obligatoire.
         const payment = await tx.payment.findFirst({
           where: {
             testId,
@@ -130,6 +141,13 @@ export class TestExpirationService {
         if (!payment) {
           throw new Error('Aucun dépôt pawaPay confirmé correspondant : examen nécessaire');
         }
+
+        // Ne jamais créer de demande financière sans destination exploitable.
+        const destination = payment.pawapayDepositRequest;
+        if (!destination?.phoneNumberEnc || !destination.correspondent) {
+          throw new Error('Destination pawaPay incomplète : remboursement suspendu');
+        }
+
         const existingRefund = await tx.refund.findFirst({
           where: { testId },
           select: { id: true },
@@ -146,12 +164,12 @@ export class TestExpirationService {
             attempt: 1,
             provider: payment.provider,
             methodType: payment.methodType,
-            operator: payment.pawapayDepositRequest?.correspondent ?? null,
+            operator: destination.correspondent,
             status: RefundStatus.CREATED,
             amount: test.rewardAmount,
             currency: test.currency,
             reason: 'INVITATION_EXPIRED_24H',
-            destinationEnc: payment.pawapayDepositRequest?.phoneNumberEnc ?? null,
+            destinationEnc: destination.phoneNumberEnc,
             destinationHmac: null,
             idempotencyKey: `test-expiry-${testId}`,
             requestedBy: 'SYSTEM',
