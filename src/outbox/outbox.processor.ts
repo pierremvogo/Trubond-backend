@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
-import { OutboxStatus } from '@prisma/client';
+import { OutboxStatus, TestStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { InvitationsService } from '../invitations/invitations.service';
 
@@ -11,6 +11,7 @@ export class OutboxProcessor {
   private readonly maxAttempts = 5;
   private readonly lockTimeoutMs = 10 * 60 * 1000;
   private readonly lockHeartbeatMs = 60 * 1000;
+  private readonly invitationValidityMs = 24 * 60 * 60 * 1000;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -61,7 +62,6 @@ export class OutboxProcessor {
 
   async recoverStuckFundedEvents(): Promise<number> {
     const now = new Date();
-
     const lockLimit = new Date(now.getTime() - this.lockTimeoutMs);
 
     const recovered = await this.prisma.outboxEvent.updateMany({
@@ -107,7 +107,6 @@ export class OutboxProcessor {
 
   async renewFundedEventLock(eventId: string, lockToken: string): Promise<boolean> {
     const now = new Date();
-
     const lockLimit = new Date(now.getTime() - this.lockTimeoutMs);
 
     const result = await this.prisma.outboxEvent.updateMany({
@@ -116,13 +115,9 @@ export class OutboxProcessor {
         eventType: 'test.funded',
         status: OutboxStatus.PROCESSING,
         lockToken,
-        lockedAt: {
-          gte: lockLimit,
-        },
+        lockedAt: { gte: lockLimit },
       },
-      data: {
-        lockedAt: now,
-      },
+      data: { lockedAt: now },
     });
 
     return result.count === 1;
@@ -148,33 +143,24 @@ export class OutboxProcessor {
       },
     });
 
-    if (claimed.count !== 1) {
-      return false;
-    }
+    if (claimed.count !== 1) return false;
 
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
-
     let heartbeatInFlight: Promise<void> | undefined;
-
     let lockLost = false;
     let heartbeatStopped = false;
 
     const heartbeat = async (): Promise<void> => {
-      if (heartbeatStopped || lockLost) {
-        return;
-      }
+      if (heartbeatStopped || lockLost) return;
 
       try {
         const renewed = await this.renewFundedEventLock(eventId, lockToken);
-
         if (!renewed) {
           lockLost = true;
-
           this.logger.error(`Événement ${eventId} : verrou perdu ou expiré`);
         }
       } catch (error: unknown) {
         lockLost = true;
-
         this.logger.error(
           `Événement ${eventId} : échec du renouvellement du verrou`,
           error instanceof Error ? error.stack : undefined,
@@ -184,23 +170,16 @@ export class OutboxProcessor {
 
     const stopHeartbeat = async (): Promise<void> => {
       heartbeatStopped = true;
-
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
       }
-
-      if (heartbeatInFlight) {
-        await heartbeatInFlight;
-      }
+      if (heartbeatInFlight) await heartbeatInFlight;
     };
 
     try {
       heartbeatTimer = setInterval(() => {
-        if (heartbeatStopped || heartbeatInFlight || lockLost) {
-          return;
-        }
-
+        if (heartbeatStopped || heartbeatInFlight || lockLost) return;
         heartbeatInFlight = heartbeat().finally(() => {
           heartbeatInFlight = undefined;
         });
@@ -211,22 +190,51 @@ export class OutboxProcessor {
         select: { aggregateId: true },
       });
 
-      if (lockLost) {
-        return false;
+      if (lockLost) return false;
+
+      const test = await this.prisma.test.findUnique({
+        where: { id: event.aggregateId },
+        select: {
+          status: true,
+          invitations: {
+            orderBy: { createdAt: 'asc' },
+            take: 1,
+            select: { createdAt: true },
+          },
+        },
+      });
+
+      if (!test) {
+        throw new Error(`Test introuvable : ${event.aggregateId}`);
       }
 
-      await this.invitationsService.createInvitationForFundedTest(event.aggregateId);
+      const firstInvitation = test.invitations[0];
+
+      if (test.status !== TestStatus.FUNDED) {
+        this.logger.log(
+          `Événement ${eventId} obsolète : test ${event.aggregateId} en statut ${test.status}`,
+        );
+      } else if (
+        firstInvitation !== undefined &&
+        firstInvitation.createdAt.getTime() + this.invitationValidityMs <= Date.now()
+      ) {
+        this.logger.warn(
+          `Événement ${eventId} obsolète : première invitation du test ${event.aggregateId} expirée ; traitement financier laissé au service d'expiration`,
+        );
+      } else {
+        // InvitationsService reprend le verrou PostgreSQL du test et revérifie
+        // son statut ainsi que la fenêtre de 24 h dans sa transaction.
+        await this.invitationsService.createInvitationForFundedTest(event.aggregateId);
+      }
 
       await stopHeartbeat();
 
       if (lockLost) {
         this.logger.warn(`Événement ${eventId} : publication annulée, verrou perdu`);
-
         return false;
       }
 
       const publicationTime = new Date();
-
       const publicationLockLimit = new Date(publicationTime.getTime() - this.lockTimeoutMs);
 
       const published = await this.prisma.outboxEvent.updateMany({
@@ -235,9 +243,7 @@ export class OutboxProcessor {
           eventType: 'test.funded',
           status: OutboxStatus.PROCESSING,
           lockToken,
-          lockedAt: {
-            gte: publicationLockLimit,
-          },
+          lockedAt: { gte: publicationLockLimit },
         },
         data: {
           status: OutboxStatus.PUBLISHED,
@@ -250,12 +256,10 @@ export class OutboxProcessor {
 
       if (published.count !== 1) {
         this.logger.warn(`Événement ${eventId} : réservation perdue ou expirée avant publication`);
-
         return false;
       }
 
       this.logger.log(`Événement ${eventId} traité avec succès`);
-
       return true;
     } catch (error: unknown) {
       await stopHeartbeat();
@@ -264,7 +268,6 @@ export class OutboxProcessor {
 
       if (lockLost) {
         this.logger.warn(`Événement ${eventId} : erreur après perte du verrou`);
-
         return false;
       }
 
@@ -274,13 +277,9 @@ export class OutboxProcessor {
       });
 
       const attempts = event?.attempts ?? this.maxAttempts;
-
       const exhausted = attempts >= this.maxAttempts;
-
       const delayMinutes = Math.pow(2, Math.max(0, attempts - 1));
-
       const failureTime = new Date();
-
       const failureLockLimit = new Date(failureTime.getTime() - this.lockTimeoutMs);
 
       const updated = await this.prisma.outboxEvent.updateMany({
@@ -289,9 +288,7 @@ export class OutboxProcessor {
           eventType: 'test.funded',
           status: OutboxStatus.PROCESSING,
           lockToken,
-          lockedAt: {
-            gte: failureLockLimit,
-          },
+          lockedAt: { gte: failureLockLimit },
         },
         data: {
           status: exhausted ? OutboxStatus.FAILED : OutboxStatus.PENDING,
@@ -306,14 +303,12 @@ export class OutboxProcessor {
         this.logger.warn(
           `Événement ${eventId} : réservation perdue ou expirée pendant la gestion de l'erreur`,
         );
-
         return false;
       }
 
       this.logger.error(
-        `Échec de l'événement ${eventId} — tentative ${attempts}/${this.maxAttempts}`,
+        `Échec de l'événement ${eventId} — tentative ${attempts}/${this.maxAttempts} : ${message}`,
       );
-
       return false;
     } finally {
       await stopHeartbeat();
