@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 
-import { hmac, encrypt } from '../auth/auth.crypto';
+import { hmac, encrypt, decrypt } from '../auth/auth.crypto';
 
 @Injectable()
 export class TestPhoneSecurity {
@@ -24,5 +24,9 @@ export class TestPhoneSecurity {
 
   encrypt(phoneE164: string): string {
     return encrypt(this.normalize(phoneE164));
+  }
+
+  decrypt(encryptedPhone: string): string {
+    return this.normalize(decrypt(encryptedPhone));
   }
 }

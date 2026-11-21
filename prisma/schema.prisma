@@ -623,6 +623,7 @@ model Test {
   referralRewards    ReferralReward[]
   supportTickets     SupportTicket[] // [NEW]
   rewardClaim        RewardClaim?
+  archivedAt         DateTime? @map("archived_at") @db.Timestamptz(6)
 
   @@index([initiatorId, createdAt])
   @@index([recipientUserId, createdAt]) // [NEW]

@@ -139,6 +139,20 @@ export class InvitationsService {
 
         const now = new Date();
 
+        // Une invitation déjà créée fixe définitivement la fenêtre de 24 h.
+        // Ne jamais renouveler le lien après expiration.
+        const firstInvitation = await tx.invitation.findFirst({
+          where: { testId },
+          orderBy: { createdAt: 'asc' },
+          select: { createdAt: true },
+        });
+        if (
+          firstInvitation &&
+          firstInvitation.createdAt.getTime() + this.invitationValidityMs <= now.getTime()
+        ) {
+          throw new GoneException('La période de 24 heures est terminée');
+        }
+
         const activeInvitations = await tx.invitation.findMany({
           where: {
             testId,
@@ -157,7 +171,10 @@ export class InvitationsService {
           (invitation) =>
             invitation.tokenEncrypted !== null &&
             invitation.expiresAt !== null &&
-            invitation.expiresAt > now,
+            invitation.expiresAt > now &&
+            (!firstInvitation ||
+              invitation.expiresAt.getTime() <=
+                firstInvitation.createdAt.getTime() + this.invitationValidityMs),
         );
 
         if (validInvitation) {
@@ -179,6 +196,10 @@ export class InvitationsService {
           }
 
           return validInvitation.id;
+        }
+
+        if (firstInvitation) {
+          throw new GoneException('Le lien initial ne peut pas être renouvelé');
         }
 
         if (activeInvitations.length > 0) {
