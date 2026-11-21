@@ -32,6 +32,7 @@ export interface PawapayRefundStatusResponse {
 // Un jeton ne peut être créé que par le service API lui-même.
 // Il est consommé synchroniquement par initiateRefund avant tout await.
 const manualPermits = new WeakSet<object>();
+const automatedPermits = new WeakSet<object>();
 export type PawapayManualPermit = Readonly<{ readonly kind: 'PAWAPAY_MANUAL_ONCE' }>;
 
 @Injectable()
@@ -107,9 +108,25 @@ export class PawapayApiService {
     return permit;
   }
 
+  // Permis à usage unique pour un remboursement déjà réservé atomiquement en base.
+  createAutomatedPermitForClaimedRefund(claimed: boolean): object {
+    if (
+      !claimed ||
+      this.config.get<string>('PAWAPAY_ENV')?.trim().toUpperCase() !== 'SANDBOX' ||
+      this.config.get<string>('OUTBOX_WORKER_MODE') !== 'INSPECT_LOOP' ||
+      this.config.get<string>('ENABLE_PAWAPAY_REFUND_SENDING') !== 'NO' ||
+      this.config.get<string>('PAWAPAY_REFUND_AUTOMATION') !== 'YES'
+    ) {
+      throw new InternalServerErrorException('Automatisation pawaPay non autorisée.');
+    }
+    const permit = Object.freeze({ kind: 'PAWAPAY_AUTOMATED_CLAIM' });
+    automatedPermits.add(permit);
+    return permit;
+  }
+
   async initiateRefund(
     request: PawapayRefundRequest,
-    manualPermit?: PawapayManualPermit,
+    manualPermit?: PawapayManualPermit | object,
   ): Promise<PawapayRefundInitiationResponse> {
     this.validateUuid(request.refundId);
     this.validateUuid(request.depositId);
@@ -125,8 +142,12 @@ export class PawapayApiService {
 
     const automatic = this.config.get<string>('ENABLE_PAWAPAY_REFUND_SENDING') === 'YES';
     const manual = !!manualPermit && manualPermits.has(manualPermit);
-    if (manualPermit) manualPermits.delete(manualPermit);
-    if (!automatic && !manual) {
+    const automated = !!manualPermit && automatedPermits.has(manualPermit);
+    if (manualPermit) {
+      manualPermits.delete(manualPermit);
+      automatedPermits.delete(manualPermit);
+    }
+    if (!automatic && !manual && !automated) {
       throw new InternalServerErrorException('Envoi des remboursements pawaPay désactivé.');
     }
     return this.post<PawapayRefundInitiationResponse>('/v2/refunds', request);
