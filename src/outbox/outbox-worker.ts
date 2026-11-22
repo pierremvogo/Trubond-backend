@@ -50,7 +50,6 @@ async function main(): Promise<void> {
     'PROCESS_ONCE',
     'PROCESS_LOOP',
     'EXPIRATION_ONCE',
-    'REFUND_ONCE',
     'REFUND_RECONCILE_ONCE',
   ];
 
@@ -62,7 +61,6 @@ async function main(): Promise<void> {
     'PROCESS_ONCE',
     'PROCESS_LOOP',
     'EXPIRATION_ONCE',
-    'REFUND_ONCE',
     'REFUND_RECONCILE_ONCE',
   ];
 
@@ -74,10 +72,6 @@ async function main(): Promise<void> {
     throw new Error('Traitement continu interdit : CONFIRM_OUTBOX_LOOP doit être YES');
   }
 
-  if (mode === 'REFUND_ONCE' && process.env.ENABLE_PAWAPAY_REFUND_SENDING !== 'YES') {
-    throw new Error('Remboursement désactivé : ENABLE_PAWAPAY_REFUND_SENDING doit être YES');
-  }
-
   const app = await NestFactory.createApplicationContext(OutboxWorkerModule, {
     logger: ['error', 'warn'],
   });
@@ -86,29 +80,8 @@ async function main(): Promise<void> {
     const processor = app.get(OutboxProcessor);
     const expirationService = app.get(TestExpirationService);
 
-    // MODE 1 : remboursement ponctuel uniquement.
-    if (mode === 'REFUND_ONCE') {
-      if (stopRequested) {
-        console.log('Arrêt demandé');
-        return;
-      }
-
-      console.log('Worker : initiation ponctuelle des remboursements pawaPay');
-
-      const refunds = app.get(PawapayRefundsService);
-
-      const result = await refunds.initiatePending(10);
-
-      console.log('Résultat remboursements :', JSON.stringify(result));
-
-      if (result.uncertain > 0 || result.rejected > 0) {
-        throw new Error('Des remboursements nécessitent une vérification');
-      }
-
-      return;
-    }
-
-    // MODE 2 : réconciliation distante uniquement.
+    // MODE 1 : réconciliation distante uniquement.
+    // Aucun nouveau remboursement n'est initié ici.
     if (mode === 'REFUND_RECONCILE_ONCE') {
       if (stopRequested) {
         console.log('Arrêt demandé');
@@ -130,7 +103,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MODE 3 : traitement continu de l'Outbox.
+    // MODE 2 : traitement continu de l'Outbox.
     if (mode === 'PROCESS_LOOP') {
       console.log('Worker Outbox : traitement continu activé');
 
@@ -151,7 +124,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MODE 4 : inspection continue.
+    // MODE 3 : inspection continue.
     if (mode === 'INSPECT_LOOP') {
       console.log('Worker Outbox : inspection continue activée');
 
@@ -176,7 +149,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MODE 5 : inspection ponctuelle.
+    // MODE 4 : inspection ponctuelle.
     if (mode === 'INSPECT') {
       console.log('Inspection des événements Outbox en attente');
 
@@ -188,7 +161,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MODE 6 : expiration ponctuelle uniquement.
+    // MODE 5 : expiration ponctuelle uniquement.
     if (mode === 'EXPIRATION_ONCE') {
       if (stopRequested) {
         console.log('Arrêt demandé : aucune expiration lancée');
@@ -218,7 +191,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    // MODE 7 : PROCESS_ONCE existant.
+    // MODE 6 : PROCESS_ONCE.
     // Expiration + un événement test.funded.
     if (stopRequested) {
       console.log('Arrêt demandé : aucun traitement lancé');
