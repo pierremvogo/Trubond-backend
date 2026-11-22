@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 
 import { AuthModule } from '../auth/auth.module';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -14,9 +15,9 @@ import { PawapayApiService } from './pawapay/pawapay-api.service';
 import { PawapayDepositsService } from './pawapay/pawapay-deposits.service';
 import { PawapayRefundsService } from './pawapay/pawapay-refunds.service';
 import { PawapayRefundFinalizationService } from './pawapay/pawapay-refund-finalization.service';
+import { PawapayRefundsSchedulerService } from './pawapay/pawapay-refunds-scheduler.service';
 import { PawapayCallbackController } from './pawapay/pawapay-callback.controller';
 import { PawapayDepositsController } from './pawapay/pawapay-deposits.controller';
-import { ConfigModule } from '@nestjs/config';
 
 @Module({
   imports: [AuthModule, PrismaModule, ConfigModule],
@@ -35,6 +36,7 @@ import { ConfigModule } from '@nestjs/config';
     PawapayDepositsService,
     PawapayRefundsService,
     PawapayRefundFinalizationService,
+    PawapayRefundsSchedulerService,
   ],
   exports: [
     StripePaymentsService,
