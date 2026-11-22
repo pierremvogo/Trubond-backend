@@ -41,8 +41,22 @@ export class TestExpirationService {
     // La première invitation détermine l'échéance du test.
     // On recherche les candidats dont une invitation est expirée,
     // puis on vérifie la première invitation sous verrou.
+    const targetTestId = process.env.TEST_EXPIRATION_TARGET_TEST_ID?.trim();
+
+    if (!targetTestId) {
+      this.logger.warn('Expiration suspendue : aucun test cible configuré');
+
+      return {
+        inspected: 0,
+        expired: 0,
+        skipped: 0,
+      };
+    }
+
     const candidates = await this.prisma.test.findMany({
       where: {
+        id: targetTestId,
+
         status: {
           in: [TestStatus.FUNDED, TestStatus.SENT],
         },
