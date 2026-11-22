@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 
@@ -24,6 +25,8 @@ import { InvitationsModule } from './invitations/invitations.module';
       cache: true,
       validate: (config) => envSchema.parse(config),
     }),
+
+    ScheduleModule.forRoot(),
 
     ThrottlerModule.forRoot([
       {
