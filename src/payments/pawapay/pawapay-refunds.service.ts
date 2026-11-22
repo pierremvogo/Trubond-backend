@@ -42,96 +42,15 @@ export class PawapayRefundsService {
       include: { test: true, payment: true },
     });
   }
-  async initiateOne(id: string) {
-    const summary = {
-      inspected: 1,
-      reserved: 0,
-      accepted: 0,
-      rejected: 0,
-      uncertain: 0,
-      skipped: 0,
-    };
-    const refund = await this.loadRefund(id);
-    if (
-      !refund ||
-      !this.isEligible(refund) ||
-      refund.status !== RefundStatus.CREATED ||
-      refund.providerReference !== null ||
-      refund.reason !== 'INVITATION_EXPIRED_24H'
-    ) {
-      summary.skipped++;
-      return summary;
-    }
-    const claim = await this.prisma.refund.updateMany({
-      where: { id, status: RefundStatus.CREATED, providerReference: null },
-      data: { status: RefundStatus.PENDING, providerReference: id },
-    });
-    if (claim.count !== 1) {
-      summary.skipped++;
-      return summary;
-    }
-    summary.reserved++;
-    try {
-      const response = await this.api.initiateRefund({
-        refundId: id,
-        depositId: refund.payment!.providerReference!,
-        amount: refund.amount.toString(),
-        currency: refund.currency,
-        clientReferenceId: refund.idempotencyKey,
-      });
-      if (response.refundId !== id) {
-        summary.uncertain++;
-        return summary;
-      }
-      if (response.status === 'ACCEPTED' || response.status === 'DUPLICATE_IGNORED') {
-        summary.accepted++;
-        return summary;
-      }
-      if (response.status === 'REJECTED') {
-        await this.prisma.refund.updateMany({
-          where: { id, status: RefundStatus.PENDING },
-          data: { status: RefundStatus.REQUIRES_REVIEW },
-        });
-        summary.rejected++;
-        return summary;
-      }
-      summary.uncertain++;
-    } catch (error) {
-      this.logger.error(
-        `Remboursement ${id} : résultat incertain`,
-        error instanceof Error ? error.message : String(error),
-      );
-      summary.uncertain++;
-    }
-    return summary;
+  // Ancienne API non ciblée : désactivée pour éviter un envoi hors scheduler.
+  async initiateOne(_id: string): Promise<never> {
+    throw new Error('Initiation directe désactivée : utiliser le scheduler contrôlé');
   }
-  async initiatePending(limit = 10) {
-    const candidates = await this.prisma.refund.findMany({
-      where: {
-        provider: PaymentProvider.PAWAPAY,
-        status: RefundStatus.CREATED,
-        providerReference: null,
-        reason: 'INVITATION_EXPIRED_24H',
-      },
-      select: { id: true },
-      orderBy: { createdAt: 'asc' },
-      take: Math.min(Math.max(Math.trunc(limit) || 1, 1), 50),
-    });
-    const summary = {
-      inspected: 0,
-      reserved: 0,
-      accepted: 0,
-      rejected: 0,
-      uncertain: 0,
-      skipped: 0,
-    };
-    for (const candidate of candidates) {
-      const result = await this.initiateOne(candidate.id);
-      for (const key of Object.keys(summary) as Array<keyof typeof summary>)
-        summary[key] += result[key];
-    }
-    return summary;
+
+  async initiatePending(_limit = 10): Promise<never> {
+    throw new Error('Initiation groupée directe désactivée : utiliser le scheduler contrôlé');
   }
+
   // La ligne SQL est insérée AVANT tout POST et ne peut jamais être supprimée
   // automatiquement. La contrainte PRIMARY KEY protège aussi entre instances Render.
   // Ce mécanisme garantit au plus UNE tentative manuelle de POST par refundId.
@@ -222,10 +141,6 @@ export class PawapayRefundsService {
   // Exclusivement pour le cron Sandbox. Réservation CREATED -> PENDING
   // avant le POST : aucun retry automatique si timeout ou crash.
   async initiateAutomatedOne(id: string, cutoff: Date) {
-    const targetId = process.env.PAWAPAY_REFUND_TARGET_ID?.trim();
-    if (!targetId || targetId !== '8d0c681a-f9d0-4c25-a355-5c17ea7eb327' || id !== targetId) {
-      throw new Error('Remboursement automatique hors cible : envoi interdit');
-    }
     if (
       process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX' ||
       process.env.OUTBOX_WORKER_MODE !== 'INSPECT_LOOP' ||
@@ -258,9 +173,7 @@ export class PawapayRefundsService {
       refund.status !== RefundStatus.CREATED ||
       refund.providerReference !== null ||
       refund.reason !== 'INVITATION_EXPIRED_24H' ||
-      refund.testId !== '3a417534-f121-438d-a0f7-1cde882a6d8c' ||
-      refund.amount !== 45000n ||
-      refund.currency !== 'XAF'
+      refund.idempotencyKey !== `test-expiry-${refund.testId}`
     ) {
       summary.skipped++;
       return summary;
