@@ -3,10 +3,8 @@ import { PaymentProvider, PaymentStatus, RefundStatus, TestStatus } from '@prism
 import { PrismaService } from '../../prisma/prisma.service';
 import { PawapayApiService } from './pawapay-api.service';
 import { PawapayRefundFinalizationService } from './pawapay-refund-finalization.service';
-
 const MANUAL_REFUND_ID = 'd00fbdd9-71a8-402a-b805-70ec90e5624e';
 const MANUAL_DEPOSIT_ID = '18bd4e4e-1dbc-4398-a069-48d75ec508b6';
-
 @Injectable()
 export class PawapayRefundsService {
   private readonly logger = new Logger(PawapayRefundsService.name);
@@ -15,7 +13,6 @@ export class PawapayRefundsService {
     private readonly api: PawapayApiService,
     private readonly finalization: PawapayRefundFinalizationService,
   ) {}
-
   private isEligible(
     refund: NonNullable<Awaited<ReturnType<PawapayRefundsService['loadRefund']>>>,
   ): boolean {
@@ -39,14 +36,12 @@ export class PawapayRefundsService {
       )
     );
   }
-
   private loadRefund(id: string) {
     return this.prisma.refund.findUnique({
       where: { id },
       include: { test: true, payment: true },
     });
   }
-
   async initiateOne(id: string) {
     const summary = {
       inspected: 1,
@@ -110,7 +105,6 @@ export class PawapayRefundsService {
     }
     return summary;
   }
-
   async initiatePending(limit = 10) {
     const candidates = await this.prisma.refund.findMany({
       where: {
@@ -138,7 +132,6 @@ export class PawapayRefundsService {
     }
     return summary;
   }
-
   // La ligne SQL est insérée AVANT tout POST et ne peut jamais être supprimée
   // automatiquement. La contrainte PRIMARY KEY protège aussi entre instances Render.
   // Ce mécanisme garantit au plus UNE tentative manuelle de POST par refundId.
@@ -166,21 +159,18 @@ export class PawapayRefundsService {
     ) {
       throw new Error('État local ou montants incompatibles avec la reprise ciblée');
     }
-
     // Préflight distant sans POST. Ne suffit pas, à lui seul, à prouver
     // qu'aucune requête ancienne n'a été envoyée.
     const remote = await this.api.getRefund(id);
     if (remote.status !== 'NOT_FOUND') {
       throw new Error('Remboursement présent ou statut pawaPay inconnu : POST interdit');
     }
-
     // Validation opérationnelle explicite. Elle doit être définie seulement
     // après examen des logs de la tentative antérieure, qui montraient un rejet
     // local avant fetch. Elle n'est PAS un mécanisme d'authentification.
     if (process.env.TRUEBOND_MANUAL_REFUND_APPROVED !== id) {
       throw new Error('Approbation opérationnelle manquante : TRUEBOND_MANUAL_REFUND_APPROVED');
     }
-
     // INSERT atomique et durable. Aucune seconde exécution ne passe cette barrière.
     // Si le processus tombe après INSERT, on conserve UNCERTAIN et on réconcilie.
     const inserted = await this.prisma.$executeRaw`
@@ -192,7 +182,6 @@ export class PawapayRefundsService {
     if (inserted !== 1) {
       throw new Error('Tentative manuelle déjà enregistrée : aucun nouveau POST autorisé');
     }
-
     const permit = this.api.createManualPermitForRecordedAttempt(true);
     try {
       const response = await this.api.initiateRefund(
@@ -230,10 +219,13 @@ export class PawapayRefundsService {
       return 'UNCERTAIN';
     }
   }
-
   // Exclusivement pour le cron Sandbox. Réservation CREATED -> PENDING
   // avant le POST : aucun retry automatique si timeout ou crash.
   async initiateAutomatedOne(id: string, cutoff: Date) {
+    const targetId = process.env.PAWAPAY_REFUND_TARGET_ID?.trim();
+    if (!targetId || targetId !== '8d0c681a-f9d0-4c25-a355-5c17ea7eb327' || id !== targetId) {
+      throw new Error('Remboursement automatique hors cible : envoi interdit');
+    }
     if (
       process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX' ||
       process.env.OUTBOX_WORKER_MODE !== 'INSPECT_LOOP' ||
@@ -265,7 +257,10 @@ export class PawapayRefundsService {
       !this.isEligible(refund) ||
       refund.status !== RefundStatus.CREATED ||
       refund.providerReference !== null ||
-      refund.reason !== 'INVITATION_EXPIRED_24H'
+      refund.reason !== 'INVITATION_EXPIRED_24H' ||
+      refund.testId !== '3a417534-f121-438d-a0f7-1cde882a6d8c' ||
+      refund.amount !== 45000n ||
+      refund.currency !== 'XAF'
     ) {
       summary.skipped++;
       return summary;
@@ -319,7 +314,6 @@ export class PawapayRefundsService {
     }
     return summary;
   }
-
   async reconcileOne(id: string) {
     const summary = {
       inspected: 1,
@@ -399,7 +393,6 @@ export class PawapayRefundsService {
     }
     return summary;
   }
-
   async reconcilePending(limit = 50) {
     const refunds = await this.prisma.refund.findMany({
       where: {

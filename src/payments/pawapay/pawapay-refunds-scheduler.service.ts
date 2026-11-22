@@ -4,6 +4,8 @@ import { PaymentProvider, RefundStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PawapayRefundsService } from './pawapay-refunds.service';
 
+const TARGET_REFUND_ID = '8d0c681a-f9d0-4c25-a355-5c17ea7eb327';
+const TARGET_TEST_ID = '3a417534-f121-438d-a0f7-1cde882a6d8c';
 const EXCLUDED_REFUNDS = [
   'd00fbdd9-71a8-402a-b805-70ec90e5624e',
   '3fd94c11-13bd-4479-8ee0-0c654f8ce7e6',
@@ -25,7 +27,6 @@ export class PawapayRefundsSchedulerService {
     waitForCompletion: true,
   })
   async execute(): Promise<void> {
-    this.logger.log('Scheduler pawaPay : déclenchement du cycle de vérification');
     if (this.running) return;
     if (
       process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX' ||
@@ -34,6 +35,12 @@ export class PawapayRefundsSchedulerService {
       process.env.PAWAPAY_REFUND_AUTOMATION !== 'YES'
     )
       return;
+
+    const targetId = process.env.PAWAPAY_REFUND_TARGET_ID?.trim();
+    if (targetId !== TARGET_REFUND_ID || EXCLUDED_REFUNDS.includes(targetId)) {
+      this.logger.warn('Scheduler pawaPay suspendu : remboursement cible non autorisé');
+      return;
+    }
 
     const raw = process.env.PAWAPAY_REFUND_AUTOMATION_START_AT;
     if (!raw || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(raw)) {
@@ -45,7 +52,6 @@ export class PawapayRefundsSchedulerService {
       this.logger.error('Date d’activation du scheduler invalide');
       return;
     }
-
     if (Date.now() < cutoff.getTime()) {
       this.logger.log(`Scheduler pawaPay en attente. Activation prévue : ${cutoff.toISOString()}`);
       return;
@@ -53,21 +59,19 @@ export class PawapayRefundsSchedulerService {
 
     this.running = true;
     try {
-      // Ne pas maintenir une transaction SQL ouverte pendant des appels HTTP.
-      // La sécurité multi-instances et anti-double-POST doit être assurée
-      // atomiquement par initiateAutomatedOne et la couche de persistance.
       let anomalies = 0;
+      // Ne réconcilier que le remboursement ciblé.
       const pending = await this.prisma.refund.findMany({
         where: {
+          id: TARGET_REFUND_ID,
+          testId: TARGET_TEST_ID,
           provider: PaymentProvider.PAWAPAY,
           status: RefundStatus.PENDING,
-          providerReference: { not: null },
+          providerReference: TARGET_REFUND_ID,
           createdAt: { gte: cutoff },
-          id: { notIn: EXCLUDED_REFUNDS },
         },
         select: { id: true },
-        orderBy: { updatedAt: 'asc' },
-        take: 50,
+        take: 1,
       });
       for (const row of pending) {
         try {
@@ -83,18 +87,22 @@ export class PawapayRefundsSchedulerService {
         }
       }
 
+      // N'initier que le remboursement précis de 45 000 XAF.
       const created = await this.prisma.refund.findMany({
         where: {
+          id: TARGET_REFUND_ID,
+          testId: TARGET_TEST_ID,
           provider: PaymentProvider.PAWAPAY,
           status: RefundStatus.CREATED,
           providerReference: null,
+          amount: 45000n,
+          currency: 'XAF',
           reason: 'INVITATION_EXPIRED_24H',
+          idempotencyKey: `test-expiry-${TARGET_TEST_ID}`,
           createdAt: { gte: cutoff },
-          id: { notIn: EXCLUDED_REFUNDS },
         },
         select: { id: true },
-        orderBy: { createdAt: 'asc' },
-        take: 10,
+        take: 1,
       });
       for (const row of created) {
         try {
