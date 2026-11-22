@@ -25,6 +25,7 @@ export class PawapayRefundsSchedulerService {
     waitForCompletion: true,
   })
   async execute(): Promise<void> {
+    this.logger.log('Scheduler pawaPay : déclenchement du cycle de vérification');
     if (this.running) return;
     if (
       process.env.PAWAPAY_ENV?.trim().toUpperCase() !== 'SANDBOX' ||
@@ -40,7 +41,15 @@ export class PawapayRefundsSchedulerService {
       return;
     }
     const cutoff = new Date(raw);
-    if (Number.isNaN(cutoff.getTime()) || Date.now() < cutoff.getTime()) return;
+    if (Number.isNaN(cutoff.getTime())) {
+      this.logger.error('Date d’activation du scheduler invalide');
+      return;
+    }
+
+    if (Date.now() < cutoff.getTime()) {
+      this.logger.log(`Scheduler pawaPay en attente. Activation prévue : ${cutoff.toISOString()}`);
+      return;
+    }
 
     this.running = true;
     try {
@@ -100,6 +109,8 @@ export class PawapayRefundsSchedulerService {
           );
         }
       }
+      this.logger.log(`Remboursements à réconcilier : ${pending.length}`);
+      this.logger.log(`Nouveaux remboursements éligibles : ${created.length}`);
       if (anomalies) this.logger.warn(`${anomalies} opération(s) nécessitent une vérification`);
     } catch (error) {
       this.logger.error(
