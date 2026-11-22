@@ -172,11 +172,26 @@ export class PawapayRefundsService {
       !this.isEligible(refund) ||
       refund.status !== RefundStatus.CREATED ||
       refund.providerReference !== null ||
-      refund.reason !== 'INVITATION_EXPIRED_24H' ||
-      refund.idempotencyKey !== `test-expiry-${refund.testId}`
+      !['INVITATION_EXPIRED_24H', 'TEST_FAILED'].includes(refund.reason) ||
+      refund.idempotencyKey !==
+        (refund.reason === 'TEST_FAILED'
+          ? `test-failed-${refund.testId}`
+          : `test-expiry-${refund.testId}`) ||
+      (refund.reason === 'TEST_FAILED' &&
+        (!refund.test.completedAt || refund.test.completedAt < cutoff))
     ) {
       summary.skipped++;
       return summary;
+    }
+    if (refund.reason === 'TEST_FAILED') {
+      const attempt = await this.prisma.testAttempt.findUnique({
+        where: { testId: refund.testId },
+        select: { isCorrect: true },
+      });
+      if (!attempt || attempt.isCorrect) {
+        summary.skipped++;
+        return summary;
+      }
     }
     const claim = await this.prisma.refund.updateMany({
       where: { id, status: RefundStatus.CREATED, providerReference: null },

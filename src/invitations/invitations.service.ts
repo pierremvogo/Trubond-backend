@@ -12,6 +12,9 @@ import {
   InvitationChannel,
   InvitationStatus,
   NotificationStatus,
+  PaymentProvider,
+  PaymentStatus,
+  RefundStatus,
   Prisma,
   TestActorType,
   TestStatus,
@@ -512,6 +515,136 @@ export class InvitationsService {
           },
         });
 
+        let refundRequested = false;
+
+        // Une mauvaise réponse est définitive : enregistrer une demande de
+        // remboursement dans CETTE transaction, sans appel réseau pawaPay.
+        // Le verrou FOR UPDATE sur tests protège contre l'expiration concurrente.
+        if (!isCorrect) {
+          const startRaw = process.env.TEST_EXPIRATION_AUTOMATION_START_AT;
+          if (!startRaw || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(startRaw)) {
+            throw new ServiceUnavailableException(
+              'Date de démarrage des remboursements non configurée',
+            );
+          }
+          const startAt = new Date(startRaw);
+          if (Number.isNaN(startAt.getTime()) || now < startAt) {
+            throw new ServiceUnavailableException(
+              'Date de démarrage des remboursements invalide ou future',
+            );
+          }
+
+          const financialTest = await tx.test.findUnique({
+            where: { id: test.id },
+            select: {
+              createdAt: true,
+              rewardAmount: true,
+              serviceFeeAmount: true,
+              totalAmount: true,
+              currency: true,
+            },
+          });
+          if (!financialTest || financialTest.createdAt < startAt) {
+            // Ne pas créer de nouveau remboursement automatique historique.
+            // L'échec reste enregistré normalement pour ces anciens tests.
+          } else {
+            if (
+              financialTest.rewardAmount <= 0n ||
+              financialTest.serviceFeeAmount < 0n ||
+              financialTest.totalAmount !==
+                financialTest.rewardAmount + financialTest.serviceFeeAmount
+            ) {
+              throw new ConflictException('Montants du test incohérents');
+            }
+            const payment = await tx.payment.findFirst({
+              where: {
+                testId: test.id,
+                provider: PaymentProvider.PAWAPAY,
+                status: PaymentStatus.SUCCEEDED,
+                confirmedAt: { not: null },
+                currency: financialTest.currency,
+                amount: { gte: financialTest.totalAmount },
+              },
+              orderBy: { confirmedAt: 'desc' },
+              select: {
+                id: true,
+                provider: true,
+                methodType: true,
+                providerReference: true,
+                pawapayDepositRequest: {
+                  select: { phoneNumberEnc: true, correspondent: true },
+                },
+              },
+            });
+            const destination = payment?.pawapayDepositRequest;
+            if (
+              !payment ||
+              !payment.providerReference ||
+              !destination?.phoneNumberEnc ||
+              !destination.correspondent
+            ) {
+              // Pas d'échec enregistré sans remboursement préparé : rollback.
+              throw new ConflictException(
+                'Paiement ou destination pawaPay non confirmé : réponse non enregistrée',
+              );
+            }
+            const existingRefund = await tx.refund.findFirst({
+              where: { testId: test.id },
+              select: { id: true },
+            });
+            if (existingRefund) {
+              throw new ConflictException('Un remboursement existe déjà pour ce test');
+            }
+            await tx.refund.create({
+              data: {
+                testId: test.id,
+                paymentId: payment.id,
+                attempt: 1,
+                provider: payment.provider,
+                methodType: payment.methodType,
+                operator: destination.correspondent,
+                status: RefundStatus.CREATED,
+                amount: financialTest.rewardAmount,
+                currency: financialTest.currency,
+                reason: 'TEST_FAILED',
+                destinationEnc: destination.phoneNumberEnc,
+                destinationHmac: null,
+                idempotencyKey: `test-failed-${test.id}`,
+                requestedBy: 'SYSTEM',
+              },
+            });
+            refundRequested = true;
+            await tx.test.update({
+              where: { id: test.id },
+              data: {
+                status: TestStatus.REFUND_PENDING,
+                version: { increment: 1 },
+              },
+            });
+            await tx.testEvent.create({
+              data: {
+                testId: test.id,
+                fromStatus: TestStatus.FAILURE,
+                toStatus: TestStatus.REFUND_PENDING,
+                actorType: TestActorType.SYSTEM,
+                source: 'invitations.submit-answer',
+                reason: 'Échec définitif ; remboursement de la récompense demandé',
+              },
+            });
+            await tx.outboxEvent.upsert({
+              where: { dedupeKey: `test-refund-requested-${test.id}` },
+              create: {
+                eventType: 'test.refund_requested',
+                aggregateType: 'Test',
+                aggregateId: test.id,
+                dedupeKey: `test-refund-requested-${test.id}`,
+                payload: { testId: test.id, reason: 'TEST_FAILED' },
+              },
+              update: {},
+            });
+          }
+        }
+
         // Créer la réclamation uniquement en cas de réponse correcte.
         // La création et le résultat du test partagent la même transaction.
         const rewardClaim = isCorrect
@@ -560,7 +693,7 @@ export class InvitationsService {
           testId: test.id,
           result: isCorrect ? 'SUCCESS' : 'FAILURE',
           isCorrect,
-          status: resultStatus,
+          status: refundRequested ? TestStatus.REFUND_PENDING : resultStatus,
           rewardClaim: rewardClaim
             ? {
                 claimId: rewardClaim.claimId,
