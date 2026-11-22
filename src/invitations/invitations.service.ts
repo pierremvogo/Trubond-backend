@@ -25,7 +25,19 @@ import { InvitationCryptoService } from './invitation-crypto.service';
 
 @Injectable()
 export class InvitationsService {
-  private readonly invitationValidityMs = 24 * 60 * 60 * 1000;
+  private readonly invitationValidityMs = this.readInvitationValidityMs();
+
+  private readInvitationValidityMs(): number {
+    const raw = process.env.INVITATION_EXPIRATION_MINUTES ?? '1440';
+    if (!/^[1-9]\d*$/.test(raw)) {
+      throw new Error('INVITATION_EXPIRATION_MINUTES doit être un entier positif');
+    }
+    const minutes = Number(raw);
+    if (!Number.isSafeInteger(minutes) || minutes > 10080) {
+      throw new Error('INVITATION_EXPIRATION_MINUTES doit être compris entre 1 et 10080');
+    }
+    return minutes * 60 * 1000;
+  }
 
   private readonly activeStatuses: InvitationStatus[] = [
     InvitationStatus.CREATED,
@@ -139,18 +151,19 @@ export class InvitationsService {
 
         const now = new Date();
 
-        // Une invitation déjà créée fixe définitivement la fenêtre de 24 h.
+        // Une invitation déjà créée fixe définitivement sa fenêtre de validité.
         // Ne jamais renouveler le lien après expiration.
         const firstInvitation = await tx.invitation.findFirst({
           where: { testId },
           orderBy: { createdAt: 'asc' },
-          select: { createdAt: true },
+          select: { createdAt: true, expiresAt: true },
         });
         if (
           firstInvitation &&
-          firstInvitation.createdAt.getTime() + this.invitationValidityMs <= now.getTime()
+          firstInvitation.expiresAt !== null &&
+          firstInvitation.expiresAt <= now
         ) {
-          throw new GoneException('La période de 24 heures est terminée');
+          throw new GoneException('La période de validité de l’invitation est terminée');
         }
 
         const activeInvitations = await tx.invitation.findMany({
@@ -173,8 +186,8 @@ export class InvitationsService {
             invitation.expiresAt !== null &&
             invitation.expiresAt > now &&
             (!firstInvitation ||
-              invitation.expiresAt.getTime() <=
-                firstInvitation.createdAt.getTime() + this.invitationValidityMs),
+              (firstInvitation.expiresAt !== null &&
+                invitation.expiresAt <= firstInvitation.expiresAt)),
         );
 
         if (validInvitation) {
