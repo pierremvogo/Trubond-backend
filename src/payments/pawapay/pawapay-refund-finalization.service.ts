@@ -194,7 +194,10 @@ export class PawapayRefundFinalizationService {
             idempotencyKey: ledgerKey,
             type: LedgerTransactionType.REFUND_SETTLEMENT,
             currency: refund.currency,
-            description: 'Remboursement de la récompense après expiration de l’invitation',
+            description:
+              refund.reason === 'TEST_FAILED'
+                ? 'Remboursement de la récompense après réponse incorrecte'
+                : 'Remboursement de la récompense après expiration de l’invitation',
             testId: refund.testId,
             paymentId: payment.id,
             refundId: refund.id,

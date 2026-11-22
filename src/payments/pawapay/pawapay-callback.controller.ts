@@ -23,6 +23,20 @@ export class PawapayCallbackController {
     }
 
     const payload = body as Record<string, unknown>;
+    // Les notifications de remboursement ne sont pas des dépôts.
+    // Ne jamais finaliser un remboursement sur la seule foi du callback :
+    // le scheduler effectue une vérification distante authentifiée.
+    const refundId = payload.refundId;
+    if (
+      typeof refundId === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(refundId)
+    ) {
+      this.logger.log(
+        `Notification remboursement ${refundId} reçue ; réconciliation distante planifiée`,
+      );
+      return { received: true };
+    }
+
     const depositId = payload.depositId;
 
     if (

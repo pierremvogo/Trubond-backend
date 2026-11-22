@@ -521,10 +521,12 @@ export class InvitationsService {
         // remboursement dans CETTE transaction, sans appel réseau pawaPay.
         // Le verrou FOR UPDATE sur tests protège contre l'expiration concurrente.
         if (!isCorrect) {
-          const startRaw = process.env.TEST_EXPIRATION_AUTOMATION_START_AT;
+          const startRaw =
+            process.env.TEST_FAILURE_REFUND_START_AT ??
+            process.env.TEST_EXPIRATION_AUTOMATION_START_AT;
           if (!startRaw || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(startRaw)) {
             throw new ServiceUnavailableException(
-              'Date de démarrage des remboursements non configurée',
+              'TEST_FAILURE_REFUND_START_AT non configurée (ou ancien paramètre de compatibilité)',
             );
           }
           const startAt = new Date(startRaw);
