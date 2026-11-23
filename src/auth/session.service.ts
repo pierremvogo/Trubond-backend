@@ -178,9 +178,30 @@ export class SessionService {
           const nextId = randomUUID();
 
           /**
-           * La nouvelle session est créée avant
-           * de renseigner replacedById, car ce champ
-           * référence sessions.id.
+           * Révoquer d'abord l'ancienne génération :
+           * l'index PostgreSQL n'autorise qu'une session active
+           * par famille. La transaction rend la rotation atomique.
+           */
+          const updated = await tx.session.updateMany({
+            where: {
+              id: old.id,
+              revokedAt: null,
+              replacedById: null,
+              expiresAt: { gt: now },
+            },
+            data: {
+              revokedAt: now,
+              lastActivityAt: now,
+            },
+          });
+
+          if (updated.count !== 1) {
+            throw new ConflictException('Rotation concurrente');
+          }
+
+          /**
+           * Une fois l'ancienne session révoquée,
+           * la contrainte d'unicité permet cette création.
            */
           await tx.session.create({
             data: {
@@ -194,31 +215,13 @@ export class SessionService {
           });
 
           /**
-           * Compare-and-swap :
-           * l'ancienne génération ne peut être
-           * remplacée qu'une seule fois.
+           * La cible existe maintenant : la clé étrangère
+           * replacedById peut être renseignée sans erreur.
            */
-          const updated = await tx.session.updateMany({
-            where: {
-              id: old.id,
-              revokedAt: null,
-              replacedById: null,
-              expiresAt: {
-                gt: now,
-              },
-            },
-            data: {
-              revokedAt: now,
-              replacedById: nextId,
-              lastActivityAt: now,
-            },
+          await tx.session.update({
+            where: { id: old.id },
+            data: { replacedById: nextId },
           });
-
-          if (updated.count !== 1) {
-            // La transaction sera annulée,
-            // y compris la nouvelle session.
-            throw new ConflictException('Rotation concurrente');
-          }
 
           return {
             kind: 'ok',
@@ -234,7 +237,10 @@ export class SessionService {
         },
       );
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034') {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        (error.code === 'P2034' || error.code === 'P2002')
+      ) {
         throw new ConflictException('Renouvellement concurrent : réessayez');
       }
 
