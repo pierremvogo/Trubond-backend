@@ -55,6 +55,7 @@ export class TestsService {
     },
     userId: string,
     refundedAmount: bigint = 0n,
+    refundReason: string | null = null,
   ) {
     const isInitiator = test.initiatorId === userId;
 
@@ -73,6 +74,7 @@ export class TestsService {
       serviceFeeAmount: test.serviceFeeAmount.toString(),
       totalAmount: test.totalAmount.toString(),
       refundedAmount: refundedAmount.toString(),
+      refundReason: test.status === TestStatus.REFUNDED ? refundReason : null,
       createdAt: test.createdAt.toISOString(),
       sentAt: test.sentAt?.toISOString() ?? null,
       expiresAt: test.expiresAt?.toISOString() ?? null,
@@ -98,6 +100,29 @@ export class TestsService {
     });
 
     return new Map(confirmed.map((entry) => [entry.testId, entry._sum.amount ?? 0n]));
+  }
+
+  /** Motif du dernier remboursement confirmé de chaque test. */
+  private async confirmedRefundReasonsByTest(testIds: string[]): Promise<Map<string, string>> {
+    if (testIds.length === 0) return new Map<string, string>();
+
+    const refunds = await this.prisma.refund.findMany({
+      where: {
+        testId: { in: testIds },
+        status: 'SUCCEEDED',
+        confirmedAt: { not: null },
+      },
+      select: { testId: true, reason: true },
+      orderBy: [{ confirmedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    const reasons = new Map<string, string>();
+    for (const refund of refunds) {
+      if (!reasons.has(refund.testId)) {
+        reasons.set(refund.testId, refund.reason);
+      }
+    }
+    return reasons;
   }
 
   async create(userId: string, dto: CreateTestDto) {
@@ -250,8 +275,14 @@ export class TestsService {
       take: 50,
     });
 
-    const refunded = await this.refundedAmountsByTest(tests.map((test) => test.id));
-    return tests.map((test) => this.serialize(test, userId, refunded.get(test.id) ?? 0n));
+    const ids = tests.map((test) => test.id);
+    const [refunded, reasons] = await Promise.all([
+      this.refundedAmountsByTest(ids),
+      this.confirmedRefundReasonsByTest(ids),
+    ]);
+    return tests.map((test) =>
+      this.serialize(test, userId, refunded.get(test.id) ?? 0n, reasons.get(test.id) ?? null),
+    );
   }
 
   async listReceived(userId: string) {
@@ -262,8 +293,14 @@ export class TestsService {
       take: 50,
     });
 
-    const refunded = await this.refundedAmountsByTest(tests.map((test) => test.id));
-    return tests.map((test) => this.serialize(test, userId, refunded.get(test.id) ?? 0n));
+    const ids = tests.map((test) => test.id);
+    const [refunded, reasons] = await Promise.all([
+      this.refundedAmountsByTest(ids),
+      this.confirmedRefundReasonsByTest(ids),
+    ]);
+    return tests.map((test) =>
+      this.serialize(test, userId, refunded.get(test.id) ?? 0n, reasons.get(test.id) ?? null),
+    );
   }
 
   async detail(userId: string, id: string) {
@@ -279,7 +316,10 @@ export class TestsService {
       throw new NotFoundException('Test introuvable');
     }
 
-    const refunded = await this.refundedAmountsByTest([test.id]);
-    return this.serialize(test, userId, refunded.get(test.id) ?? 0n);
+    const [refunded, reasons] = await Promise.all([
+      this.refundedAmountsByTest([test.id]),
+      this.confirmedRefundReasonsByTest([test.id]),
+    ]);
+    return this.serialize(test, userId, refunded.get(test.id) ?? 0n, reasons.get(test.id) ?? null);
   }
 }
