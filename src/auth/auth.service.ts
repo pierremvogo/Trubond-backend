@@ -35,6 +35,7 @@ import {
 } from './auth.crypto';
 
 import { SessionService } from './session.service';
+
 import { SocketOtpProvider } from './otp/socket-otp.provider';
 
 @Injectable()
@@ -43,7 +44,9 @@ export class AuthService {
 
   constructor(
     private readonly prisma: PrismaService,
+
     private readonly sessions: SessionService,
+
     private readonly socketOtp: SocketOtpProvider,
   ) {}
 
@@ -52,9 +55,13 @@ export class AuthService {
   }
 
   /**
+
    * Vérifie que le service OTP Socket.IO est utilisé
+
    * uniquement dans un environnement de développement.
+
    */
+
   private assertDevOtpEnabled(): void {
     if (process.env.NODE_ENV === 'production' || process.env.OTP_DELIVERY_PROVIDER !== 'socket') {
       throw new ServiceUnavailableException('OTP Socket.IO indisponible dans cet environnement');
@@ -62,11 +69,17 @@ export class AuthService {
   }
 
   /**
+
    * Génère et envoie un OTP via Socket.IO.
+
    *
+
    * Le code OTP n'est jamais stocké en clair.
+
    * Il est conservé sous forme de HMAC dans Prisma.
+
    */
+
   private async issueOtp(phone: string, purpose: OtpPurpose, channelToken?: string) {
     this.assertDevOtpEnabled();
 
@@ -81,9 +94,11 @@ export class AuthService {
     const recipientHmac = this.phoneKey(phone);
 
     // Limitation : un OTP par minute et par numéro.
+
     const recent = await this.prisma.otpChallenge.count({
       where: {
         recipientHmac,
+
         createdAt: {
           gt: new Date(Date.now() - 60_000),
         },
@@ -99,27 +114,38 @@ export class AuthService {
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
 
     // Créer le challenge avant l'envoi.
+
     await this.prisma.otpChallenge.create({
       data: {
         id,
+
         recipientHmac,
+
         codeHash: otpHash(id, code),
+
         purpose,
+
         status: OtpStatus.CREATED,
+
         expiresAt: new Date(Date.now() + 5 * 60_000),
+
         maxAttempts: 5,
       },
     });
 
     try {
       // Livraison uniquement via Socket.IO.
+
       const result = await this.socketOtp.sendOtp(channelToken, id, code);
 
       await this.prisma.otpChallenge.update({
         where: { id },
+
         data: {
           status: OtpStatus.SENT,
+
           provider: 'OTHER',
+
           ...(result.providerRef !== undefined ? { providerRef: result.providerRef } : {}),
         },
       });
@@ -127,8 +153,10 @@ export class AuthService {
       await this.prisma.otpChallenge.updateMany({
         where: {
           id,
+
           status: OtpStatus.CREATED,
         },
+
         data: {
           status: OtpStatus.FAILED,
         },
@@ -136,6 +164,7 @@ export class AuthService {
 
       this.logger.error(
         'OTP Socket.IO : échec de livraison',
+
         error instanceof Error ? error.stack : String(error),
       );
 
@@ -144,18 +173,26 @@ export class AuthService {
 
     return {
       challengeId: id,
+
       message: 'Un code de vérification a été demandé',
     };
   }
 
   /**
+
    * Consomme un OTP dans la même transaction
+
    * que l'opération métier protégée.
+
    */
+
   private async consumeOtp(
     tx: Prisma.TransactionClient,
+
     challengeId: string,
+
     code: string,
+
     purpose: OtpPurpose,
   ): Promise<string | null> {
     const challenge = await tx.otpChallenge.findUnique({
@@ -177,16 +214,21 @@ export class AuthService {
     const changed = await tx.otpChallenge.updateMany({
       where: {
         id: challengeId,
+
         status: OtpStatus.SENT,
+
         attempts: challenge.attempts,
       },
+
       data: {
         attempts: { increment: 1 },
+
         status: match
           ? OtpStatus.VERIFIED
           : challenge.attempts + 1 >= challenge.maxAttempts
             ? OtpStatus.LOCKED
             : OtpStatus.SENT,
+
         verifiedAt: match ? new Date() : null,
       },
     });
@@ -199,12 +241,19 @@ export class AuthService {
   }
 
   /**
+
    * 1. INSCRIPTION
+
    *
+
    * Enregistre entre 1 et 3 numéros.
+
    * Aucun numéro n'est considéré comme vérifié.
+
    * Déclenche l'OTP du numéro principal.
+
    */
+
   async register(dto: RegisterDto, channelToken?: string) {
     this.assertDevOtpEnabled();
 
@@ -212,14 +261,9 @@ export class AuthService {
       throw new BadRequestException('Le header x-dev-otp-channel est requis');
     }
 
-    this.logger.log('REGISTER: début');
-
     const phoneRegex = /^\+[1-9]\d{7,14}$/;
-
     const phone = dto.phone.trim();
-
     const additionalPhones = (dto.additionalPhones ?? []).map((value) => value.trim());
-
     const allPhones = [phone, ...additionalPhones];
 
     if (additionalPhones.length > 2 || allPhones.some((value) => !phoneRegex.test(value))) {
@@ -232,93 +276,133 @@ export class AuthService {
       throw new BadRequestException('Chaque numéro de téléphone doit être différent');
     }
 
-    const phoneRecords = allPhones?.map((value, index) => ({
-      phone: value,
-      phoneHmac: this.phoneKey(value),
-      phoneEnc: encrypt(value),
-      isPrimary: index === 0,
-    }));
-
-    const primaryRecord = phoneRecords[0];
-
-    if (!primaryRecord) {
+    const phoneHmacs = allPhones.map((value) => this.phoneKey(value));
+    const primaryHmac = phoneHmacs[0];
+    if (!primaryHmac) {
       throw new BadRequestException('Le numéro principal est obligatoire');
     }
+    const existingPrimary = await this.prisma.user.findUnique({
+      where: { phoneHmac: primaryHmac },
+      select: {
+        id: true,
+        status: true,
+        phoneVerifiedAt: true,
+        passwordHash: true,
+        phones: { select: { phoneHmac: true, isPrimary: true } },
+      },
+    });
 
-    const phoneHmacs = phoneRecords.map((record) => record.phoneHmac);
+    if (existingPrimary) {
+      // Un compte vérifié, désactivé ou supprimé ne peut pas être réinscrit.
+      if (existingPrimary.status !== UserStatus.ACTIVE || existingPrimary.phoneVerifiedAt) {
+        throw new ConflictException('Ce numéro est déjà associé à un compte');
+      }
 
-    // Vérifier les numéros déjà enregistrés.
+      // La reprise exige la connaissance du mot de passe ORIGINAL.
+      // Ne jamais écraser un mot de passe ou des numéros sur une simple requête register.
+      if (
+        !existingPrimary.passwordHash ||
+        !(await verifyPassword(dto.password, existingPrimary.passwordHash))
+      ) {
+        throw new ConflictException(
+          'Inscription déjà commencée avec ce numéro. Utilisez le mot de passe initial.',
+        );
+      }
+
+      const savedPrimary = existingPrimary.phones.filter((entry) => entry.isPrimary);
+      if (savedPrimary.length !== 1 || savedPrimary[0]?.phoneHmac !== primaryHmac) {
+        throw new ConflictException('Inscription incomplète : contactez le support');
+      }
+
+      // Si des numéros facultatifs sont renvoyés, ils doivent correspondre
+      // exactement aux numéros déjà associés. Une modification nécessite un flux dédié.
+      const savedAdditional = existingPrimary.phones
+        .filter((entry) => !entry.isPrimary)
+        .map((entry) => entry.phoneHmac)
+        .sort();
+      const requestedAdditional = phoneHmacs.slice(1).sort();
+      if (
+        requestedAdditional.length > 0 &&
+        (requestedAdditional.length !== savedAdditional.length ||
+          requestedAdditional.some((value, index) => value !== savedAdditional[index]))
+      ) {
+        throw new ConflictException(
+          'Cette inscription existe déjà avec d’autres numéros facultatifs. Reprenez avec le numéro principal uniquement.',
+        );
+      }
+
+      // Le challenge OTP est créé pour le même numéro principal.
+      // La limitation de fréquence et la durée de vie restent gérées par issueOtp().
+      return this.issueOtp(phone, OtpPurpose.SIGN_UP, channelToken);
+    }
+
+    // Aucun compte principal : vérifier les collisions avec les autres utilisateurs,
+    // y compris lorsqu'un numéro demandé est secondaire ailleurs.
     const [existingUsers, existingPhones] = await Promise.all([
-      this.prisma.user.findMany({
-        where: {
-          phoneHmac: { in: phoneHmacs },
-        },
-        select: { id: true },
-      }),
-      this.prisma.userPhone.findMany({
-        where: {
-          phoneHmac: { in: phoneHmacs },
-        },
-        select: { id: true },
-      }),
+      this.prisma.user.count({ where: { phoneHmac: { in: phoneHmacs } } }),
+      this.prisma.userPhone.count({ where: { phoneHmac: { in: phoneHmacs } } }),
     ]);
-
-    if (existingUsers.length > 0 || existingPhones.length > 0) {
+    if (existingUsers > 0 || existingPhones > 0) {
       throw new ConflictException('Un ou plusieurs numéros sont déjà enregistrés');
     }
 
     const passwordHash = await hashPassword(dto.password);
-
-    // Créer le compte et les numéros ensemble.
-    const user = await this.prisma.user.create({
-      data: {
-        phoneHmac: primaryRecord.phoneHmac,
-        phoneEnc: primaryRecord.phoneEnc,
-        countryCode: dto.countryCode,
-        passwordHash,
-        phoneVerifiedAt: null,
-
-        phones: {
-          create: phoneRecords.map((record) => ({
-            phoneHmac: record.phoneHmac,
-            phoneEnc: record.phoneEnc,
-            isPrimary: record.isPrimary,
-            verifiedAt: null,
-          })),
+    const phoneRecords = allPhones.map((value, index) => ({
+      phoneHmac: this.phoneKey(value),
+      phoneEnc: encrypt(value),
+      isPrimary: index === 0,
+      verifiedAt: null,
+    }));
+    try {
+      await this.prisma.user.create({
+        data: {
+          phoneHmac: primaryHmac,
+          phoneEnc: encrypt(phone),
+          countryCode: dto.countryCode,
+          passwordHash,
+          phoneVerifiedAt: null,
+          phones: {
+            create: phoneRecords,
+          },
         },
-      },
-      select: {
-        id: true,
-      },
-    });
+        select: { id: true },
+      });
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('Un ou plusieurs numéros sont déjà enregistrés');
+      }
+      throw error;
+    }
 
-    this.logger.log(`REGISTER: utilisateur créé avec ${allPhones.length} numéro(s)`);
-
-    // OTP uniquement sur le numéro principal.
-    const otp = await this.issueOtp(phone, OtpPurpose.SIGN_UP, channelToken);
-
-    this.logger.log('REGISTER: OTP principal demandé');
-
-    return {
-      challengeId: otp.challengeId,
-      message: otp.message,
-    };
+    // Si l'envoi échoue, l'inscription reste récupérable avec le mot de passe initial.
+    // Ne pas supprimer automatiquement le compte : cela pourrait introduire une course.
+    return this.issueOtp(phone, OtpPurpose.SIGN_UP, channelToken);
   }
 
   /**
+
    * 2. CONFIRMATION INSCRIPTION
+
    *
+
    * Vérifie l'OTP du numéro principal.
+
    * Synchronise User et UserPhone.
+
    * Crée une session après validation.
+
    */
+
   async verifySignup(dto: VerifyDto) {
     const userId = await this.prisma.$transaction(async (tx) => {
       const phoneHmac = await this.consumeOtp(tx, dto.challengeId, dto.code, OtpPurpose.SIGN_UP);
 
       // Important :
+
       // Retourner null sans lever d'exception ici
+
       // permet de conserver les tentatives OTP incorrectes.
+
       if (!phoneHmac) {
         return null;
       }
@@ -334,20 +418,26 @@ export class AuthService {
       const now = new Date();
 
       // Vérifier le numéro principal dans User.
+
       await tx.user.update({
         where: { id: user.id },
+
         data: {
           phoneVerifiedAt: now,
         },
       });
 
       // Synchroniser le numéro principal dans UserPhone.
+
       const updated = await tx.userPhone.updateMany({
         where: {
           userId: user.id,
+
           phoneHmac,
+
           isPrimary: true,
         },
+
         data: {
           verifiedAt: now,
         },
@@ -368,10 +458,15 @@ export class AuthService {
   }
 
   /**
+
    * 3. CONNEXION
+
    * Connexion directe par téléphone et mot de passe,
+
    * sans vérification OTP.
+
    */
+
   async login(dto: LoginDto) {
     const phone = dto.phone.trim();
 
@@ -392,13 +487,18 @@ export class AuthService {
     }
 
     // Identifiants valides :
+
     // création directe de la session et des tokens.
+
     return this.sessions.createSession(user.id);
   }
 
   /**
+
    * 4. VÉRIFICATION OTP CONNEXION
+
    */
+
   async verifyLogin(dto: VerifyDto) {
     const userId = await this.prisma.$transaction(async (tx) => {
       const phoneHmac = await this.consumeOtp(tx, dto.challengeId, dto.code, OtpPurpose.SIGN_IN);
@@ -426,8 +526,11 @@ export class AuthService {
   }
 
   /**
+
    * 5. MOT DE PASSE OUBLIÉ
+
    */
+
   async forgotPassword(phone: string, channelToken?: string) {
     this.assertDevOtpEnabled();
 
@@ -447,16 +550,22 @@ export class AuthService {
   }
 
   /**
+
    * 6. RÉINITIALISATION DU MOT DE PASSE
+
    */
+
   async resetPassword(dto: ResetDto) {
     const passwordHash = await hashPassword(dto.newPassword);
 
     const changed = await this.prisma.$transaction(async (tx) => {
       const phoneHmac = await this.consumeOtp(
         tx,
+
         dto.challengeId,
+
         dto.code,
+
         OtpPurpose.PASSWORD_RESET,
       );
 
@@ -474,14 +583,17 @@ export class AuthService {
 
       await tx.user.update({
         where: { id: user.id },
+
         data: { passwordHash },
       });
 
       await tx.session.updateMany({
         where: {
           userId: user.id,
+
           revokedAt: null,
         },
+
         data: {
           revokedAt: new Date(),
         },
@@ -500,8 +612,11 @@ export class AuthService {
   }
 
   /**
+
    * 7. CHANGEMENT DU MOT DE PASSE
+
    */
+
   async changePassword(userId: string, dto: ChangePasswordDto) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -520,14 +635,17 @@ export class AuthService {
     await this.prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: userId },
+
         data: { passwordHash },
       });
 
       await tx.session.updateMany({
         where: {
           userId,
+
           revokedAt: null,
         },
+
         data: {
           revokedAt: new Date(),
         },
@@ -540,40 +658,58 @@ export class AuthService {
   }
 
   /**
+
    * 8. RENOUVELLEMENT DES TOKENS
+
    */
+
   refresh(refreshToken: string) {
     return this.sessions.refresh(refreshToken);
   }
 
   /**
+
    * 9. DÉCONNEXION
+
    */
+
   logout(userId: string, familyId: string) {
     return this.sessions.logout(userId, familyId);
   }
 
   /**
+
    * 10. DÉCONNEXION GLOBALE
+
    */
+
   logoutAll(userId: string) {
     return this.sessions.logoutAll(userId);
   }
 
   /**
+
    * 11. PROFIL UTILISATEUR
+
    */
 
   async me(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
+
       select: {
         id: true,
+
         phoneEnc: true,
+
         countryCode: true,
+
         locale: true,
+
         status: true,
+
         createdAt: true,
+
         phoneVerifiedAt: true,
       },
     });
@@ -586,11 +722,17 @@ export class AuthService {
 
     return {
       id: user.id,
+
       phone,
+
       countryCode: user.countryCode,
+
       locale: user.locale,
+
       status: user.status,
+
       createdAt: user.createdAt,
+
       phoneVerifiedAt: user.phoneVerifiedAt,
     };
   }
@@ -598,14 +740,18 @@ export class AuthService {
   async deleteAccount(userId: string, dto: DeleteAccountDto) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
+
       select: {
         id: true,
+
         status: true,
+
         passwordHash: true,
       },
     });
 
     // Ne pas révéler inutilement l'état du compte.
+
     if (!user || user.status !== UserStatus.ACTIVE || !user.passwordHash) {
       throw new UnauthorizedException('Compte non autorisé');
     }
@@ -620,15 +766,21 @@ export class AuthService {
 
     await this.prisma.$transaction(async (tx) => {
       // Mise à jour conditionnelle :
+
       // empêche une deuxième suppression simultanée.
+
       const result = await tx.user.updateMany({
         where: {
           id: userId,
+
           status: UserStatus.ACTIVE,
         },
+
         data: {
           status: UserStatus.DELETED,
+
           deletedAt: now,
+
           passwordHash: null,
         },
       });
@@ -638,11 +790,14 @@ export class AuthService {
       }
 
       // Révocation de toutes les sessions.
+
       await tx.session.updateMany({
         where: {
           userId,
+
           revokedAt: null,
         },
+
         data: {
           revokedAt: now,
         },
