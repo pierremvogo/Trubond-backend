@@ -4,10 +4,8 @@ import { PaymentProvider, RefundStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PawapayRefundsService } from './pawapay-refunds.service';
 
-const EXCLUDED_REFUNDS = [
-  'd00fbdd9-71a8-402a-b805-70ec90e5624e',
-  '3fd94c11-13bd-4479-8ee0-0c654f8ce7e6',
-];
+const TARGET_REFUND_ID = '3fd94c11-13bd-4479-8ee0-0c654f8ce7e6';
+const EXCLUDED_REFUNDS = ['d00fbdd9-71a8-402a-b805-70ec90e5624e'];
 const AUTOMATED_REASONS = ['INVITATION_EXPIRED_24H', 'TEST_FAILED'];
 const DEFAULT_STALE_MINUTES = 30;
 
@@ -65,7 +63,7 @@ export class PawapayRefundsSchedulerService {
       const baseWhere = {
         provider: PaymentProvider.PAWAPAY,
         reason: { in: AUTOMATED_REASONS },
-        createdAt: { gte: cutoff },
+        OR: [{ createdAt: { gte: cutoff } }, { id: TARGET_REFUND_ID }],
         id: { notIn: EXCLUDED_REFUNDS },
       };
 
