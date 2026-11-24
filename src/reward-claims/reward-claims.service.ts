@@ -4,12 +4,16 @@ import {
   GoneException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 
 import { Prisma, RewardClaimStatus, TestStatus } from '@prisma/client';
 
 import { PrismaService } from '../prisma/prisma.service';
 import { InvitationTokenService } from '../invitations/invitation-token.service';
+
+import { OtpChallengeService } from '../auth/otp/otp-challenge.service';
+import { TestPhoneSecurity } from '../tests/test-phone-security.service';
 
 @Injectable()
 export class RewardClaimsService {
@@ -20,6 +24,8 @@ export class RewardClaimsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly tokenService: InvitationTokenService,
+    private readonly otp: OtpChallengeService,
+    private readonly phoneSecurity: TestPhoneSecurity,
   ) {}
 
   /**
@@ -105,6 +111,7 @@ export class RewardClaimsService {
         expiresAt: true,
         identityVerifiedAt: true,
         destinationVerifiedAt: true,
+        test: { select: { rewardAmount: true, currency: true } },
       },
     });
 
@@ -128,6 +135,8 @@ export class RewardClaimsService {
 
     return {
       claimId: claim.id,
+      rewardAmount: claim.test.rewardAmount.toString(),
+      currency: claim.test.currency,
       status: claim.status,
       identityVerified: claim.identityVerifiedAt !== null,
       destinationVerified: claim.destinationVerifiedAt !== null,
@@ -187,5 +196,132 @@ export class RewardClaimsService {
     });
 
     return { accessToken: token };
+  }
+  private assertDevelopment() {
+    if (process.env.NODE_ENV === 'production' || process.env.OTP_DELIVERY_PROVIDER !== 'socket') {
+      throw new ServiceUnavailableException('Vérification de récompense indisponible.');
+    }
+  }
+
+  private async lockedClaim(
+    tx: Prisma.TransactionClient,
+    token: string,
+    status: RewardClaimStatus,
+  ) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new BadRequestException('Token invalide.');
+    const hash = this.tokenService.hash(token);
+    const initial = await tx.rewardClaim.findUnique({
+      where: { accessTokenHash: hash },
+      select: { testId: true },
+    });
+    if (!initial) throw new NotFoundException('Réclamation introuvable.');
+    await tx.$queryRaw`SELECT id FROM tests WHERE id = ${initial.testId}::uuid FOR UPDATE`;
+    const claim = await tx.rewardClaim.findUnique({
+      where: { accessTokenHash: hash },
+      include: { test: { include: { attempt: true } } },
+    });
+    if (!claim) throw new NotFoundException('Réclamation introuvable.');
+    if (
+      !claim.accessExpiresAt ||
+      claim.accessExpiresAt <= new Date() ||
+      claim.expiresAt <= new Date()
+    )
+      throw new GoneException('Accès expiré.');
+    if (
+      claim.status !== status ||
+      claim.test.status !== TestStatus.SUCCESS ||
+      !claim.test.attempt?.isCorrect
+    )
+      throw new ConflictException('Étape non autorisée.');
+    return claim;
+  }
+
+  async requestIdentityOtp(token: string, channelToken: string) {
+    this.assertDevelopment();
+    return this.prisma.$transaction(
+      async (tx) => {
+        const claim = await this.lockedClaim(tx, token, RewardClaimStatus.PENDING_IDENTITY);
+        if (!claim.test.recipientPhoneEnc)
+          throw new ConflictException('Numéro bénéficiaire indisponible.');
+        const phone = this.phoneSecurity.decrypt(claim.test.recipientPhoneEnc);
+        if (this.phoneSecurity.hmac(phone) !== claim.test.recipientPhoneHmac)
+          throw new ConflictException('Numéro bénéficiaire incohérent.');
+        return this.otp.issueRewardOtp(phone, claim.testId, channelToken);
+      },
+      { timeout: 15000 },
+    );
+  }
+
+  async verifyIdentityOtp(token: string, challengeId: string, code: string) {
+    this.assertDevelopment();
+    const result = await this.prisma.$transaction(async (tx) => {
+      const claim = await this.lockedClaim(tx, token, RewardClaimStatus.PENDING_IDENTITY);
+      if (
+        !(await this.otp.consumeRewardOtp(
+          tx,
+          challengeId,
+          code,
+          claim.testId,
+          claim.test.recipientPhoneHmac,
+        ))
+      )
+        return null;
+      await tx.rewardClaim.update({
+        where: { id: claim.id },
+        data: { status: RewardClaimStatus.IDENTITY_VERIFIED, identityVerifiedAt: new Date() },
+      });
+      return this.rotateAfterIdentityVerification(tx, claim.id);
+    });
+    if (!result) throw new BadRequestException('Code invalide ou expiré.');
+    return { ...result, status: RewardClaimStatus.IDENTITY_VERIFIED };
+  }
+
+  async requestDestinationOtp(token: string, phone: string, channelToken: string) {
+    this.assertDevelopment();
+    const normalized = this.phoneSecurity.normalize(phone);
+    if (!/^\+2376\d{8}$/.test(normalized))
+      throw new BadRequestException('Numéro camerounais requis.');
+    return this.prisma.$transaction(
+      async (tx) => {
+        const claim = await this.lockedClaim(tx, token, RewardClaimStatus.IDENTITY_VERIFIED);
+        const result = await this.otp.issueRewardOtp(normalized, claim.testId, channelToken);
+        await tx.rewardClaim.update({
+          where: { id: claim.id },
+          data: {
+            destinationEnc: this.phoneSecurity.encrypt(normalized),
+            destinationHmac: this.phoneSecurity.hmac(normalized),
+            destinationVerifiedAt: null,
+          },
+        });
+        return result;
+      },
+      { timeout: 15000 },
+    );
+  }
+
+  async verifyDestinationOtp(token: string, challengeId: string, code: string) {
+    this.assertDevelopment();
+    const result = await this.prisma.$transaction(async (tx) => {
+      const claim = await this.lockedClaim(tx, token, RewardClaimStatus.IDENTITY_VERIFIED);
+      if (!claim.destinationHmac || !claim.destinationEnc || !claim.identityVerifiedAt)
+        throw new ConflictException('Destination non renseignée.');
+      if (
+        !(await this.otp.consumeRewardOtp(
+          tx,
+          challengeId,
+          code,
+          claim.testId,
+          claim.destinationHmac,
+        ))
+      )
+        return false;
+      await tx.rewardClaim.update({
+        where: { id: claim.id },
+        data: { status: RewardClaimStatus.DESTINATION_VERIFIED, destinationVerifiedAt: new Date() },
+      });
+      return true;
+    });
+    if (!result) throw new BadRequestException('Code invalide ou expiré.');
+    return { status: RewardClaimStatus.DESTINATION_VERIFIED };
   }
 }
